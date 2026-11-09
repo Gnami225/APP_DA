@@ -14,9 +14,7 @@ from reportlab.platypus import (Image, Paragraph, SimpleDocTemplate, Spacer, Tab
 
 from logic import as_text, fmt_date
 
-ORANGE = colors.HexColor("#F29200")
-DARK = colors.HexColor("#3A3A3A")
-LIGHT = colors.HexColor("#F2F2F2")
+NOIR = colors.black  # fiche 100 % noir sur blanc : aucun aplat, économie d'encre
 GRID = colors.black
 HERE = Path(__file__).resolve().parent
 
@@ -46,13 +44,13 @@ _s = {
     "cellc": ParagraphStyle("cellc", fontName="Helvetica", fontSize=8.5, leading=10, alignment=TA_CENTER),
     "lab": ParagraphStyle("lab", fontName="Helvetica-Bold", fontSize=8.5, leading=10),
     "th": ParagraphStyle("th", fontName="Helvetica-Bold", fontSize=7.5, leading=9,
-                         alignment=TA_CENTER, textColor=colors.white),
+                         alignment=TA_CENTER, textColor=NOIR),
     "sec": ParagraphStyle("sec", fontName="Helvetica-Bold", fontSize=10, leading=12,
-                          textColor=ORANGE, spaceBefore=6, spaceAfter=3),
+                          textColor=NOIR, spaceBefore=6, spaceAfter=3),
     "t1": ParagraphStyle("t1", fontName="Helvetica-Bold", fontSize=12, leading=14, alignment=TA_CENTER),
     "t2": ParagraphStyle("t2", fontName="Helvetica-Bold", fontSize=10, leading=12, alignment=TA_CENTER),
     "ref": ParagraphStyle("ref", fontName="Helvetica", fontSize=7, leading=9),
-    "small": ParagraphStyle("small", fontName="Helvetica", fontSize=7.5, leading=9, textColor=colors.grey),
+    "small": ParagraphStyle("small", fontName="Helvetica", fontSize=7.5, leading=9, textColor=NOIR),
 }
 
 
@@ -79,12 +77,12 @@ def build_pdf(da: dict, lignes: list[dict], refs: dict) -> bytes:
     def footer(canvas, doc):
         canvas.saveState()
         canvas.setFont("Helvetica", 7)
-        canvas.setFillColor(colors.grey)
+        canvas.setFillColor(NOIR)
         canvas.drawString(15 * mm, 9 * mm, f"{numero}  —  Statut : {statut}")
         canvas.drawRightString(195 * mm, 9 * mm, f"Page {doc.page}")
         if statut in ("Validée", "Rejetée"):
             canvas.setFont("Helvetica-Bold", 11)
-            canvas.setFillColor(colors.HexColor("#1E7B34") if statut == "Validée" else colors.HexColor("#B3261E"))
+            canvas.setFillColor(NOIR)
             canvas.drawRightString(195 * mm, 287 * mm, statut.upper())
         canvas.restoreState()
 
@@ -119,7 +117,6 @@ def build_pdf(da: dict, lignes: list[dict], refs: dict) -> bytes:
     ], colWidths=[38 * mm, 52 * mm, 38 * mm, 52 * mm])
     info.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.8, GRID),
-        ("BACKGROUND", (0, 0), (0, -1), LIGHT), ("BACKGROUND", (2, 0), (2, -1), LIGHT),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
@@ -141,7 +138,6 @@ def build_pdf(da: dict, lignes: list[dict], refs: dict) -> bytes:
                 repeatRows=1)
     det.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.8, GRID),
-        ("BACKGROUND", (0, 0), (-1, 0), DARK),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 1), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 1), (-1, -1), 4),
@@ -159,7 +155,6 @@ def build_pdf(da: dict, lignes: list[dict], refs: dict) -> bytes:
                   colWidths=[60 * mm] * 3, rowHeights=[None, 30 * mm])
     visas.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.8, GRID),
-        ("BACKGROUND", (0, 0), (-1, 0), DARK),
         ("VALIGN", (0, 0), (-1, 0), "MIDDLE"), ("VALIGN", (0, 1), (-1, 1), "TOP"),
     ]))
     story.append(visas)
