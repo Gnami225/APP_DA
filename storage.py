@@ -24,7 +24,8 @@ def _frame(rows: list[list], header: list[str], table: str) -> pd.DataFrame:
     df = df.fillna("")
     # lignes complètement vides (fréquentes en fin de feuille) écartées
     if len(df):
-        df = df[~(df.astype(str).apply(lambda r: "".join(r).strip(), axis=1) == "")]
+        vide = df.astype(str).apply(lambda r: "".join(r).strip(), axis=1) == ""
+        df = df.loc[~vide.astype(bool)]
     return df.reset_index(drop=True)
 
 
@@ -41,6 +42,19 @@ def _clean(v):
     return str(v)
 
 
+def _fix_key(key: str) -> str:
+    """Répare les erreurs de copie courantes de la clé privée."""
+    key = str(key).strip().strip('"').strip("'")
+    key = key.replace("\\n", "\n").replace("\r", "")
+    head, tail = "-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"
+    if head in key and tail in key:
+        body = key.split(head, 1)[1].split(tail, 1)[0]
+        body = "".join(body.split())  # retire espaces et retours parasites
+        lines = [body[i:i + 64] for i in range(0, len(body), 64)]
+        key = head + "\n" + "\n".join(lines) + "\n" + tail + "\n"
+    return key
+
+
 class GoogleSheetStore:
     """Backend Google Sheets via un compte de service."""
 
@@ -48,8 +62,10 @@ class GoogleSheetStore:
         import gspread
         from google.oauth2.service_account import Credentials
 
+        info = dict(service_account_info)
+        info["private_key"] = _fix_key(info.get("private_key", ""))
         creds = Credentials.from_service_account_info(
-            dict(service_account_info),
+            info,
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
         self.gc = gspread.authorize(creds)
