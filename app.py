@@ -15,16 +15,28 @@ import streamlit as st
 
 from logic import as_text, build_da, decide, fmt_date, is_true, send_email, to_date
 from pdf import build_pdf, find_logo
-from schema import COLISAGES, PRIORITES, ROLES_VALIDATION, STATUTS, STATUTS_LIGNE
+from schema import ANCIENS_STATUTS, COLISAGES, PRIORITES, ROLES_ADMIN, STATUTS, STATUTS_LIGNE
 from storage import ExcelStore, GoogleSheetStore
 
 APP_DIR = Path(__file__).resolve().parent
 LOGO = find_logo()
+_u = st.session_state.get("user") or {}
 st.set_page_config(page_title="DA Chantier PWC", page_icon=str(LOGO) if LOGO else "📋",
-                   layout="centered")
-st.markdown("""<style>
-div.block-container{padding-top:1.2rem;padding-bottom:3rem}
-.stButton>button,.stDownloadButton>button{width:100%;min-height:2.8rem}
+                   layout="wide" if _u.get("Rôle") == "Admin" else "centered")
+ORANGE = "#F29200"
+st.markdown(f"""<style>
+div.block-container{{padding-top:3.2rem;padding-bottom:3rem}}
+.stButton>button,.stDownloadButton>button{{width:100%;min-height:2.8rem;font-weight:600}}
+.pwc-bar{{display:flex;align-items:center;justify-content:space-between;gap:.8rem;
+  border-bottom:3px solid {ORANGE};padding:.2rem 0 .6rem;margin-bottom:.6rem}}
+.pwc-bar .t{{font-size:1.15rem;font-weight:700;letter-spacing:.02em}}
+.pwc-bar .t span{{color:{ORANGE}}}
+.pwc-bar .u{{font-size:.85rem;opacity:.8;text-align:right}}
+.pwc-badge{{display:inline-block;padding:.05rem .5rem;border-radius:1rem;font-size:.75rem;font-weight:700;
+  background:{ORANGE};color:#141414;margin-left:.3rem}}
+div[data-baseweb="tab-list"] button[aria-selected="true"] p{{color:{ORANGE};font-weight:700}}
+div[data-testid="stMetricValue"]{{color:{ORANGE}}}
+[data-testid="stMarkdownContainer"] h5{{color:{ORANGE}}}
 </style>""", unsafe_allow_html=True)
 
 
@@ -99,7 +111,11 @@ def _load_all() -> dict:
 
 
 def load(table: str) -> pd.DataFrame:
-    return _load_all()[table]
+    df = _load_all()[table]
+    if table == "DA" and len(df):
+        df = df.copy()
+        df["Statut"] = df["Statut"].map(lambda s: ANCIENS_STATUTS.get(as_text(s), as_text(s)))
+    return df
 
 
 def refresh():
@@ -238,12 +254,15 @@ def onglet_nouvelle(user: dict):
     chantier = c1.selectbox("Chantier", codes_ch, format_func=lambda c: r["chantiers"].get(c, c),
                             index=codes_ch.index(user["Chantier"]) if user["Chantier"] in codes_ch else 0)
     date_da = c2.date_input("Date", value=date.today(), format="DD/MM/YYYY")
+    c1, c2 = st.columns(2)
     service = c1.selectbox("Service demandeur", codes_sv, format_func=lambda c: r["services"].get(c, c),
                            index=codes_sv.index(user["Service"]) if user["Service"] in codes_sv else 0)
-    resp_defaut = as_text(sv[sv["Code Service"].map(as_text) == service].iloc[0]["Responsable"])
-    demandeur = c2.text_input("Demandeur", value=user["Nom"])
-    responsable = c1.text_input("Responsable du service", value=resp_defaut, key=f"resp-{service}")
+    resp_defaut = as_text(sv.loc[sv["Code Service"].map(as_text) == service].iloc[0]["Responsable"])
+    responsable = c2.text_input("Responsable du service", value=resp_defaut, key=f"resp-{service}")
+    c1, c2 = st.columns(2)
+    demandeur = c1.text_input("Demandeur", value=user["Nom"])
     code_da = c2.text_input("Code DA (facultatif)")
+    c1, c2 = st.columns(2)
     priorite = c1.selectbox("Priorité", PRIORITES)
     date_besoin = c2.date_input("Date de besoin", value=None, format="DD/MM/YYYY")
     observations = st.text_area("Observations", height=68)
@@ -323,33 +342,6 @@ def onglet_mes_da(user: dict):
         detail_da(d, "mes")
 
 
-def onglet_valider(user: dict):
-    da = load("DA")
-    todo = da[da["Statut"].map(as_text) == "Soumise"]
-    if user["Rôle"] != "Admin" and user["Chantier"]:
-        todo = todo[todo["Chantier"].map(as_text) == user["Chantier"]]
-    st.caption(f"{len(todo)} demande(s) en attente")
-    d = choisir_da(todo, "val")
-    if not d:
-        return
-    detail_da(d, "val")
-    c1, c2 = st.columns(2)
-    if c1.button("Valider", type="primary", key="ok"):
-        decide(get_store(), d["ID_DA"], "Validée", user["Nom"])
-        refresh()
-        _notifier(d, "Validée")
-        st.rerun()
-    motif = c2.text_input("Motif du rejet", key="motif")
-    if c2.button("Rejeter", key="ko"):
-        if not motif.strip():
-            st.error("Indiquez le motif du rejet.")
-        else:
-            decide(get_store(), d["ID_DA"], "Rejetée", user["Nom"], motif.strip())
-            refresh()
-            _notifier(d, "Rejetée")
-            st.rerun()
-
-
 def _notifier(d: dict, statut: str):
     smtp = _secret("smtp")
     if not smtp or not as_text(d.get("Email Demandeur")):
@@ -365,53 +357,135 @@ def _notifier(d: dict, statut: str):
         pass
 
 
-def onglet_toutes(user: dict):
+def _num(v):
+    t = as_text(v).replace(" ", "").replace(",", ".")
+    try:
+        return float(t) if t else ""
+    except ValueError:
+        return as_text(v)
+
+
+def onglet_admin(user: dict):
     da = load("DA")
-    c1, c2 = st.columns(2)
-    chs = c1.multiselect("Chantier", sorted(da["Chantier"].map(as_text).unique()))
-    sts = c2.multiselect("Statut", STATUTS)
+    if not len(da):
+        st.info("Aucune DA pour le moment.")
+        return
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Émises", int((da["Statut"] == "Émise").sum()))
+    k2.metric("Validées", int((da["Statut"] == "Validée").sum()))
+    k3.metric("Rejetées", int((da["Statut"] == "Rejetée").sum()))
+
+    r = refs()
+    c1, c2, c3 = st.columns([2, 2, 2])
+    chs = c1.multiselect("Chantier", sorted(da["Chantier"].map(as_text).unique()),
+                         format_func=lambda c: r["chantiers"].get(c, c), placeholder="Tous")
+    sts = c2.multiselect("Statut", STATUTS, placeholder="Tous")
+    cherche = c3.text_input("N° DA ou demandeur")
     f = da
     if chs:
-        f = f[f["Chantier"].map(as_text).isin(chs)]
+        f = f.loc[f["Chantier"].map(as_text).isin(chs)]
     if sts:
-        f = f[f["Statut"].map(as_text).isin(sts)]
-    tableau_da(f)
-    d = choisir_da(f, "all")
+        f = f.loc[f["Statut"].isin(sts)]
+    if cherche.strip():
+        q = cherche.strip().lower()
+        f = f.loc[(f["N° DA"].map(as_text).str.lower().str.contains(q, regex=False))
+                  | (f["Demandeur"].map(as_text).str.lower().str.contains(q, regex=False))]
+    f = f.sort_values("Créé le", ascending=False)
+
+    st.markdown("##### Demandes d'achat")
+    st.caption("Modifiez directement dans le tableau (statut, priorité…), puis enregistrez. "
+               "Passer une DA en Validée ou Rejetée renseigne automatiquement le validateur et la date.")
+    cols = ["ID_DA", "N° DA", "Date DA", "Chantier", "Demandeur", "Statut", "Priorité",
+            "Responsable", "Code DA", "Motif rejet", "Validé par", "Date validation"]
+    vue = f[cols].copy()
+    vue["Date DA"] = vue["Date DA"].map(fmt_date)
+    vue["Date validation"] = vue["Date validation"].map(fmt_date)
+    for c in cols:
+        if c not in ("Date DA", "Date validation"):
+            vue[c] = vue[c].map(as_text)
+    version = st.session_state.get("adm_v", 0)
+    ed = st.data_editor(
+        vue, hide_index=True, width="stretch", key=f"adm-da-{version}",
+        disabled=["N° DA", "Date DA", "Chantier", "Demandeur", "Validé par", "Date validation"],
+        column_config={
+            "ID_DA": None,
+            "Statut": st.column_config.SelectboxColumn("Statut", options=STATUTS, required=True),
+            "Priorité": st.column_config.SelectboxColumn("Priorité", options=PRIORITES, required=True),
+            "Motif rejet": st.column_config.TextColumn("Motif rejet", width="medium"),
+        })
+    if st.button("Enregistrer les modifications", type="primary", key="adm-save"):
+        avant, apres = vue.set_index("ID_DA"), ed.set_index("ID_DA")
+        changes, notifs, sans_motif = {}, [], []
+        for id_da in apres.index:
+            diff = {c: as_text(apres.at[id_da, c]) for c in ["Statut", "Priorité", "Responsable", "Code DA", "Motif rejet"]
+                    if as_text(apres.at[id_da, c]) != as_text(avant.at[id_da, c])}
+            if not diff:
+                continue
+            if "Statut" in diff:
+                if diff["Statut"] in ("Validée", "Rejetée"):
+                    diff["Validé par"] = user["Nom"]
+                    diff["Date validation"] = date.today().isoformat()
+                    notifs.append((id_da, diff["Statut"]))
+                else:
+                    diff["Validé par"] = ""
+                    diff["Date validation"] = ""
+            if as_text(apres.at[id_da, "Statut"]) == "Rejetée" and not as_text(apres.at[id_da, "Motif rejet"]):
+                sans_motif.append(as_text(apres.at[id_da, "N° DA"]))
+            changes[id_da] = diff
+        if not changes:
+            st.info("Aucune modification à enregistrer.")
+        else:
+            get_store().update_many("DA", "ID_DA", changes)
+            refresh()
+            for id_da, statut in notifs:
+                _notifier({"ID_DA": id_da, "Email Demandeur": "x"}, statut)
+            st.session_state.adm_v = version + 1
+            st.session_state.adm_msg = (f"{len(changes)} DA mise(s) à jour."
+                                        + (f" Motif de rejet manquant : {', '.join(sans_motif)}." if sans_motif else ""))
+            st.rerun()
+    if st.session_state.get("adm_msg"):
+        st.success(st.session_state.pop("adm_msg"))
+
+    st.markdown("##### Détail et lignes d'une DA")
+    d = choisir_da(f, "adm")
     if not d:
         return
-    detail_da(d, "all")
-    with st.expander("Mettre à jour le statut (Achats)"):
-        nouveau = st.selectbox("Nouveau statut", STATUTS, index=STATUTS.index(as_text(d["Statut"]))
-                               if as_text(d["Statut"]) in STATUTS else 0)
-        if st.button("Enregistrer le statut"):
-            get_store().update("DA", "ID_DA", d["ID_DA"], {"Statut": nouveau})
-            refresh()
-            st.rerun()
-    with st.expander("Suivi achats des lignes (fournisseur, BC, prix, livraison)"):
-        lg = pd.DataFrame(lignes_de(d["ID_DA"]))
-        if len(lg):
-            cols = ["ID_Ligne", "N° Ligne", "Désignation", "Quantité", "Fournisseur", "N° BC",
-                    "Prix unitaire HT", "Qté livrée", "Date livraison", "Statut ligne"]
-            ed = st.data_editor(
-                lg[cols].sort_values("N° Ligne"), hide_index=True, width="stretch",
-                disabled=["ID_Ligne", "N° Ligne", "Désignation", "Quantité"],
-                column_config={"ID_Ligne": None,
-                               "Statut ligne": st.column_config.SelectboxColumn(options=STATUTS_LIGNE),
-                               "Prix unitaire HT": st.column_config.TextColumn(),
-                               "Qté livrée": st.column_config.TextColumn(),
-                               "Date livraison": st.column_config.TextColumn(help="AAAA-MM-JJ")},
-                key=f"ed-{d['ID_DA']}")
-            if st.button("Enregistrer le suivi"):
-                for _, row in ed.iterrows():
-                    vals = {c: as_text(row[c]) for c in cols[4:]}
-                    for c in ("Prix unitaire HT", "Qté livrée"):
-                        try:
-                            vals[c] = float(vals[c].replace(" ", "").replace(",", ".")) if vals[c] else ""
-                        except ValueError:
-                            pass
-                    get_store().update("HISTORIQUE_ARTICLES", "ID_Ligne", row["ID_Ligne"], vals)
+    detail_da(d, "adm")
+    lg = pd.DataFrame(lignes_de(d["ID_DA"]))
+    if not len(lg):
+        return
+    lcols = ["ID_Ligne", "N° Ligne", "Désignation", "Référence", "Code_Parc", "Colisage", "Quantité", "Usage",
+             "Fournisseur", "N° BC", "Prix unitaire HT", "Qté livrée", "Date livraison", "Statut ligne"]
+    lv = lg[lcols].sort_values("N° Ligne").copy()
+    for c in lcols:
+        lv[c] = lv[c].map(as_text)
+    with st.expander("Modifier les lignes et le suivi achats"):
+        led = st.data_editor(
+            lv, hide_index=True, width="stretch", key=f"adm-lg-{d['ID_DA']}-{version}",
+            disabled=["N° Ligne"],
+            column_config={"ID_Ligne": None,
+                           "Colisage": st.column_config.SelectboxColumn(options=COLISAGES),
+                           "Statut ligne": st.column_config.SelectboxColumn(options=STATUTS_LIGNE),
+                           "Date livraison": st.column_config.TextColumn(help="AAAA-MM-JJ")})
+        if st.button("Enregistrer les lignes", key="adm-lg-save"):
+            avant, apres = lv.set_index("ID_Ligne"), led.set_index("ID_Ligne")
+            changes = {}
+            for idl in apres.index:
+                diff = {c: as_text(apres.at[idl, c]) for c in lcols[2:]
+                        if as_text(apres.at[idl, c]) != as_text(avant.at[idl, c])}
+                for c in ("Quantité", "Prix unitaire HT", "Qté livrée"):
+                    if c in diff:
+                        diff[c] = _num(diff[c])
+                if diff:
+                    changes[idl] = diff
+            if changes:
+                get_store().update_many("HISTORIQUE_ARTICLES", "ID_Ligne", changes)
                 refresh()
-                st.success("Suivi enregistré.")
+                st.session_state.adm_v = version + 1
+                st.session_state.adm_msg = f"{len(changes)} ligne(s) mise(s) à jour."
+                st.rerun()
+            else:
+                st.info("Aucune modification à enregistrer.")
 
 
 def onglet_analyses():
@@ -458,25 +532,25 @@ def main():
     if "user" not in st.session_state:
         login()
     user = st.session_state.user
-    h1, h2 = st.columns([4, 1])
-    h1.markdown(f"**DA Chantier PWC** · {user['Nom']} ({user['Rôle'] or 'Demandeur'})")
+    admin = user["Rôle"] in ROLES_ADMIN
+    badge = '<span class="pwc-badge">ADMIN</span>' if admin else ""
+    h1, h2 = st.columns([5, 1], vertical_alignment="center")
+    h1.markdown(f'<div class="pwc-bar"><div class="t">DA <span>Chantier</span> PWC</div>'
+                f'<div class="u">{user["Nom"]}{badge}</div></div>', unsafe_allow_html=True)
     if h2.button("Quitter"):
         st.session_state.clear()
         st.rerun()
 
-    valideur = user["Rôle"] in ROLES_VALIDATION
-    noms = ["Nouvelle DA", "Mes DA"] + (["À valider", "Toutes les DA", "Analyses"] if valideur else [])
+    noms = ["Nouvelle DA", "Mes DA"] + (["Administration", "Analyses"] if admin else [])
     tabs = st.tabs(noms)
     with tabs[0]:
         onglet_nouvelle(user)
     with tabs[1]:
         onglet_mes_da(user)
-    if valideur:
+    if admin:
         with tabs[2]:
-            onglet_valider(user)
+            onglet_admin(user)
         with tabs[3]:
-            onglet_toutes(user)
-        with tabs[4]:
             onglet_analyses()
 
 
