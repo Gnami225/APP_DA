@@ -20,7 +20,7 @@ TABLES = {
     "CHANTIERS": ["Code Chantier", "Nom Chantier", "Localisation", "Chef de chantier",
                   "Email validateur", "Actif"],
     "SERVICES": ["Code Service", "Libellé", "Responsable", "Email responsable"],
-    "UTILISATEURS": ["Email", "Nom", "Rôle", "Chantier", "Service", "Actif", "PIN"],
+    "UTILISATEURS": ["Email", "Nom", "Rôle", "Chantier", "Service", "Actif", "PIN", "Poste"],
     "PARC": ["Code_Parc", "Désignation engin", "Type", "Marque / Modèle", "Chantier"],
     "ARTICLES": ["Code Article", "Désignation", "Référence", "Famille", "Colisage"],
 }
