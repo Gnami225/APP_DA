@@ -13,11 +13,16 @@ POSTES = {  # poste = service PWC ; la valeur est le code service (et le préfix
     "QHSE": "QHSE",
     "Comptabilité": "CPT",
     "Ressources humaines": "RH",
+    "Direction générale": "DG",
+    "Direction d'exploitation": "DE",
 }
 
 
 def _plat(txt: str) -> str:
-    sans = unicodedata.normalize("NFKD", str(txt)).encode("ascii", "ignore").decode()
+    txt = str(txt)
+    for c in "'’‘`´-–_/":
+        txt = txt.replace(c, " ")
+    sans = unicodedata.normalize("NFKD", txt).encode("ascii", "ignore").decode()
     return " ".join(sans.lower().replace("&", " et ").split())
 
 
