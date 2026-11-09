@@ -18,7 +18,27 @@ ORANGE = colors.HexColor("#F29200")
 DARK = colors.HexColor("#3A3A3A")
 LIGHT = colors.HexColor("#F2F2F2")
 GRID = colors.black
-LOGO = Path(__file__).resolve().parent / "logo.png"
+HERE = Path(__file__).resolve().parent
+
+
+def find_logo() -> Path | None:
+    """logo.png, logo.jpg ou logo.jpeg (majuscules acceptées) à côté du code."""
+    for f in sorted(HERE.iterdir()):
+        if f.is_file() and f.stem.lower() == "logo" and f.suffix.lower() in (".png", ".jpg", ".jpeg"):
+            return f
+    return None
+
+
+def _logo_flowable(max_w=38 * mm, max_h=19 * mm):
+    path = find_logo()
+    if not path:
+        return ""
+    from PIL import Image as PILImage
+
+    with PILImage.open(path) as im:
+        w, h = im.size
+    scale = min(max_w / w, max_h / h)  # proportions du logo respectées
+    return Image(str(path), width=w * scale, height=h * scale)
 NB_LIGNES_MIN = 15  # le formulaire papier comporte 15 lignes
 
 _s = {
@@ -74,7 +94,7 @@ def build_pdf(da: dict, lignes: list[dict], refs: dict) -> bytes:
     story = []
 
     # ---- en-tête documentaire
-    logo = Image(str(LOGO), width=38 * mm, height=38 * mm * 60 / 130) if LOGO.exists() else ""
+    logo = _logo_flowable()
     ref = _p("Référence : SC/ADM/LOG/QHSE/TECH-PWC-ExB-01\nCréation : 05/11/2025\nRévision :\n"
              "Accessibilité : Tous les services\nVersion : 01", "ref")
     head = Table([[logo, _p("ASSURER LES COMMANDES", "t1"), ref],
