@@ -83,3 +83,45 @@ class Garde:
 
 def ligne_txt(nom: str, poste: str, code: str) -> str:
     return f"{nom} ; {poste} : {code}"
+
+
+# --------------------------------------------------------------------------- session persistante
+import base64
+import hashlib
+import hmac
+
+DUREE_SESSION_JOURS = 30
+
+
+def _b64(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def _unb64(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def creer_jeton(nom: str, code: str, secret: str, jours: int = DUREE_SESSION_JOURS) -> str:
+    """Jeton signé : nom + échéance ; la signature dépend aussi du code d'accès actuel."""
+    exp = int(time.time()) + jours * 86400
+    charge = f"{nom}|{exp}"
+    sig = hmac.new(secret.encode(), f"{charge}|{normalise(code)}".encode(), hashlib.sha256).digest()[:18]
+    return f"{_b64(charge.encode())}.{_b64(sig)}"
+
+
+def lire_jeton(jeton: str, secret: str, code_de) -> str | None:
+    """Retourne le nom si le jeton est valide, non expiré et que le code n'a pas changé ; sinon None.
+    code_de(nom) doit renvoyer le code actuel de la personne (ou None si inconnue / inactive)."""
+    try:
+        p_charge, p_sig = jeton.split(".", 1)
+        charge = _unb64(p_charge).decode()
+        nom, exp = charge.rsplit("|", 1)
+        if int(exp) < time.time():
+            return None
+        code = code_de(nom)
+        if not code:
+            return None
+        attendu = hmac.new(secret.encode(), f"{charge}|{normalise(code)}".encode(), hashlib.sha256).digest()[:18]
+        return nom if hmac.compare_digest(attendu, _unb64(p_sig)) else None
+    except Exception:
+        return None
