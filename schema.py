@@ -27,6 +27,7 @@ TABLES = {
 
 PRIORITES = ["Normale", "Urgente", "Critique"]
 COLISAGES = ["Unité", "Paquet", "Carton", "ml", "m²", "m³", "kg", "L", "Jeu", "Lot"]
-STATUTS = ["Soumise", "Validée", "Rejetée", "Commandée", "Clôturée"]
+STATUTS = ["Émise", "Validée", "Rejetée"]
+ANCIENS_STATUTS = {"Soumise": "Émise"}  # DA créées avant le renommage
 STATUTS_LIGNE = ["À commander", "Commandée", "Livrée partielle", "Livrée", "Annulée"]
-ROLES_VALIDATION = {"Validateur", "Admin"}
+ROLES_ADMIN = {"Admin"}
