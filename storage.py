@@ -55,8 +55,22 @@ def _fix_key(key: str) -> str:
     return key
 
 
+def _retry(fn, *args, **kwargs):
+    """Rejoue l'appel si Google répond « trop de requêtes » (429) ou erreur passagère (5xx)."""
+    import time
+    from gspread.exceptions import APIError
+
+    for attempt in range(6):
+        try:
+            return fn(*args, **kwargs)
+        except APIError as exc:
+            if getattr(exc, "code", 0) not in (429, 500, 502, 503) or attempt == 5:
+                raise
+            time.sleep(min(2 ** attempt, 30))
+
+
 class GoogleSheetStore:
-    """Backend Google Sheets via un compte de service."""
+    """Backend Google Sheets via un compte de service. Une seule lecture groupée par rafraîchissement."""
 
     def __init__(self, service_account_info: dict, sheet_id: str):
         import gspread
@@ -69,74 +83,80 @@ class GoogleSheetStore:
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
         self.gc = gspread.authorize(creds)
-        self.sh = self.gc.open_by_key(sheet_id)
-        self._ws: dict = {}
+        self.sh = _retry(self.gc.open_by_key, sheet_id)
+        self._ws: dict = {ws.title: ws for ws in self.sh.worksheets()}  # pas d'appel : métadonnées déjà chargées
         self._headers: dict[str, list[str]] = {}
         self.ensure_schema()
 
-    def _sheet(self, table: str):
-        if table not in self._ws:
-            self._ws[table] = self.sh.worksheet(table)
-        return self._ws[table]
+    @staticmethod
+    def _rng(table: str, rows: str = "") -> str:
+        return f"'{table}'" + (f"!{rows}" if rows else "")
 
     def ensure_schema(self):
         import gspread
 
-        existing = {ws.title for ws in self.sh.worksheets()}
         for table, cols in TABLES.items():
-            if table not in existing:
-                ws = self.sh.add_worksheet(table, rows=1000, cols=max(len(cols), 10))
-                ws.update([cols], "A1")
-                ws.freeze(rows=1)
-            ws = self._sheet(table)
-            header = ws.row_values(1)
-            missing = [c for c in cols if c not in header]
+            if table not in self._ws:
+                ws = _retry(self.sh.add_worksheet, table, rows=1000, cols=max(len(cols), 10))
+                _retry(ws.update, [cols], "A1")
+                self._ws[table] = ws
+        res = _retry(self.sh.values_batch_get, [self._rng(t, "1:1") for t in TABLES])
+        for table, vr in zip(TABLES, res.get("valueRanges", [])):
+            header = [str(h) for h in (vr.get("values") or [[]])[0]]
+            missing = [c for c in TABLES[table] if c not in header]
             if missing:
+                ws = self._ws[table]
                 start = len(header) + 1
-                if ws.col_count < start + len(missing) - 1:
-                    ws.add_cols(start + len(missing) - 1 - ws.col_count)
-                ws.update([missing], gspread.utils.rowcol_to_a1(1, start))
+                need = start + len(missing) - 1
+                if ws.col_count < need:
+                    _retry(ws.add_cols, need - ws.col_count)
+                _retry(ws.update, [missing], gspread.utils.rowcol_to_a1(1, start))
                 header = header + missing
             self._headers[table] = header
 
-    def read(self, table: str) -> pd.DataFrame:
-        ws = self._sheet(table)
-        from gspread.utils import ValueRenderOption
+    def read_all(self) -> dict[str, pd.DataFrame]:
+        res = _retry(self.sh.values_batch_get, [self._rng(t) for t in TABLES],
+                     params={"valueRenderOption": "UNFORMATTED_VALUE"})
+        out = {}
+        for table, vr in zip(TABLES, res.get("valueRanges", [])):
+            values = vr.get("values") or []
+            if not values:
+                out[table] = _frame([], TABLES[table], table)
+                continue
+            header = [str(h) for h in values[0]]
+            width = len(header)
+            rows = [(list(r) + [""] * width)[:width] for r in values[1:]]
+            out[table] = _frame(rows, header, table)
+        return out
 
-        values = ws.get_all_values(value_render_option=ValueRenderOption.unformatted)
-        if not values:
-            return _frame([], TABLES[table], table)
-        header = [str(h) for h in values[0]]
-        width = len(header)
-        rows = [(r + [""] * width)[:width] for r in values[1:]]
-        return _frame(rows, header, table)
+    def read(self, table: str) -> pd.DataFrame:
+        return self.read_all()[table]
 
     def append(self, table: str, rows: list[dict]):
         if not rows:
             return
-        header = self._headers[table]
-        data = [[_clean(r.get(c, "")) for c in header] for r in rows]
         from gspread.utils import InsertDataOption, ValueInputOption
 
-        self._sheet(table).append_rows(data, value_input_option=ValueInputOption.raw,
-                                       insert_data_option=InsertDataOption.insert_rows,
-                                       table_range="A1")
+        header = self._headers[table]
+        data = [[_clean(r.get(c, "")) for c in header] for r in rows]
+        _retry(self._ws[table].append_rows, data, value_input_option=ValueInputOption.raw,
+               insert_data_option=InsertDataOption.insert_rows, table_range="A1")
 
     def update(self, table: str, key_col: str, key: str, values: dict):
         import gspread
 
-        ws = self._sheet(table)
+        ws = self._ws[table]
         header = self._headers[table]
-        keys = ws.col_values(header.index(key_col) + 1)
+        keys = _retry(ws.col_values, header.index(key_col) + 1)
         try:
-            row = keys.index(str(key)) + 1
+            row = [str(k) for k in keys].index(str(key)) + 1
         except ValueError as exc:
             raise KeyError(f"{key} introuvable dans {table}") from exc
         batch = []
         for col, val in values.items():
             a1 = gspread.utils.rowcol_to_a1(row, header.index(col) + 1)
             batch.append({"range": a1, "values": [[_clean(val)]]})
-        ws.batch_update(batch)  # raw=True par défaut : valeurs écrites telles quelles
+        _retry(ws.batch_update, batch)  # raw=True par défaut : valeurs écrites telles quelles
 
 
 class ExcelStore:
@@ -193,6 +213,9 @@ class ExcelStore:
         header = [str(h) for h in rows[0]]
         body = [[("" if v is None else v) for v in r] for r in rows[1:]]
         return _frame(body, header, table)
+
+    def read_all(self) -> dict[str, pd.DataFrame]:
+        return {t: self.read(t) for t in TABLES}
 
     def append(self, table: str, rows: list[dict]):
         from openpyxl import load_workbook
