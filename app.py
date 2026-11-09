@@ -37,10 +37,24 @@ def _secret(key, default=None):
 
 
 @st.cache_resource(show_spinner="Connexion à la base…")
+def _service_account():
+    """Clé Google : bloc [gcp_service_account] ou fichier JSON collé tel quel dans GCP_JSON."""
+    raw = _secret("GCP_JSON")
+    if raw:
+        import json
+        return json.loads(raw)
+    sa = _secret("gcp_service_account")
+    return dict(sa) if sa else None
+
+
 def get_store():
-    sa, sheet_id = _secret("gcp_service_account"), _secret("SHEET_ID")
+    sa, sheet_id = _service_account(), _secret("SHEET_ID")
     if sa and sheet_id:
         return GoogleSheetStore(sa, sheet_id)
+    if sheet_id:  # en ligne mais clé illisible : ne jamais basculer en silence sur un fichier local
+        st.error("Clé Google introuvable dans les secrets : ajoutez GCP_JSON (contenu du fichier .json) "
+                 "ou le bloc [gcp_service_account], puis redémarrez l'app.")
+        st.stop()
     path = os.environ.get("DA_EXCEL_PATH", str(APP_DIR / "data" / "PWC_DA_local.xlsx"))
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     return ExcelStore(path)
@@ -85,7 +99,7 @@ def login():
         st.image(str(LOGO), width=150)
     st.subheader("Demandes d'achat chantier")
     users = load("UTILISATEURS")
-    users = users[users["Actif"].map(lambda v: as_text(v) == "" or is_true(v))]
+    users = users.loc[users["Actif"].map(lambda v: as_text(v) == "" or is_true(v)).astype(bool)]
     noms = sorted(users["Nom"].map(as_text).loc[lambda s: s != ""].unique())
     admin_pin = as_text(_secret("ADMIN_PIN", ""))
     choix = noms + (["Administrateur (secours)"] if admin_pin else [])
@@ -167,7 +181,7 @@ def onglet_nouvelle(user: dict):
         return
 
     ch = load("CHANTIERS")
-    ch = ch[ch["Actif"].map(lambda v: as_text(v) == "" or is_true(v))]
+    ch = ch.loc[ch["Actif"].map(lambda v: as_text(v) == "" or is_true(v)).astype(bool)]
     codes_ch = ch["Code Chantier"].map(as_text).tolist()
     sv = load("SERVICES")
     codes_sv = sv["Code Service"].map(as_text).tolist()
