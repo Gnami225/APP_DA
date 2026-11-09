@@ -124,8 +124,16 @@ def _load_all() -> dict:
     return get_store().read_all()  # un seul appel Google pour tous les onglets
 
 
+_COLONNES_REQUISES = {"UTILISATEURS": ["Email", "Nom", "Rôle", "Chantier", "Service", "Actif", "PIN", "Poste"]}
+
+
 def load(table: str) -> pd.DataFrame:
     df = _load_all()[table]
+    manquantes = [c for c in _COLONNES_REQUISES.get(table, []) if c not in df.columns]
+    if manquantes:  # tolère un schema.py ou un Google Sheet en retard d'une version
+        df = df.copy()
+        for c in manquantes:
+            df[c] = ""
     if table == "DA" and len(df):
         df = df.copy()
         df["Statut"] = df["Statut"].map(lambda s: ANCIENS_STATUTS.get(as_text(s), as_text(s)))
