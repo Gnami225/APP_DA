@@ -45,14 +45,26 @@ def _service_account():
         if isinstance(raw, dict):  # GCP_JSON saisi comme table TOML
             return dict(raw)
         txt = str(raw)
+        for bad, good in {"\u201c": '"', "\u201d": '"', "\u201e": '"', "\u00ab": '"', "\u00bb": '"',
+                          "\u2018": "'", "\u2019": "'", "\u00a0": " ", "\ufeff": ""}.items():
+            txt = txt.replace(bad, good)  # guillemets typographiques, espaces insécables
         start, end = txt.find("{"), txt.rfind("}")
         try:
             if start < 0 or end < start:
-                raise ValueError("pas d'accolades")
-            return json.loads(txt[start:end + 1], strict=False)  # tolère les vrais retours à la ligne
-        except ValueError:
-            st.error("Le secret GCP_JSON n'est pas un JSON valide : collez tout le contenu du fichier "
-                     ".json de la clé, de la première { à la dernière }, sans rien y ajouter.")
+                raise ValueError("aucune accolade { } trouvée")
+            return json.loads(txt[start:end + 1], strict=False)
+        except ValueError as exc:
+            import re
+            champs = re.findall(r'"([a-z_0-9]+)"\s*:', txt)
+            attendus = ["type", "project_id", "private_key_id", "private_key", "client_email", "token_uri"]
+            manquants = [c for c in attendus if c not in champs]
+            st.error("Le secret GCP_JSON n'est pas lisible. Diagnostic (sans la clé) :")
+            st.code(f"Erreur : {getattr(exc, 'msg', exc)}"
+                    + (f" (ligne {exc.lineno}, colonne {exc.colno})" if hasattr(exc, "lineno") else "")
+                    + f"\nLongueur : {len(txt)} caractères, {txt.count(chr(10)) + 1} lignes"
+                    + f"\nCommence par : {txt.strip()[:1]!r}   Finit par : {txt.strip()[-1:]!r}"
+                    + f"\nChamps trouvés : {', '.join(champs) or 'aucun'}"
+                    + f"\nChamps manquants : {', '.join(manquants) or 'aucun'}")
             st.stop()
     sa = _secret("gcp_service_account")
     return dict(sa) if sa else None
@@ -61,7 +73,17 @@ def _service_account():
 def get_store():
     sa, sheet_id = _service_account(), _secret("SHEET_ID")
     if sa and sheet_id:
-        return GoogleSheetStore(sa, sheet_id)
+        try:
+            return GoogleSheetStore(sa, sheet_id)
+        except Exception as exc:
+            code = getattr(exc, "code", "")
+            aide = {403: "accès refusé : partagez le Google Sheet avec l'adresse du compte de service (Éditeur) "
+                         "et vérifiez que l'API Google Sheets est activée dans le projet.",
+                    404: "Google Sheet introuvable : vérifiez SHEET_ID dans les secrets.",
+                    429: "quota Google momentanément dépassé : patientez une minute puis rechargez la page."}
+            st.error(f"Connexion au Google Sheet impossible (code {code}) — "
+                     f"{aide.get(code, 'réessayez dans une minute ; si cela persiste, envoyez ce message.')}")
+            st.stop()
     if sheet_id:  # en ligne mais clé illisible : ne jamais basculer en silence sur un fichier local
         st.error("Clé Google introuvable dans les secrets : ajoutez GCP_JSON (contenu du fichier .json) "
                  "ou le bloc [gcp_service_account], puis redémarrez l'app.")
@@ -71,13 +93,17 @@ def get_store():
     return ExcelStore(path)
 
 
-@st.cache_data(ttl=20, show_spinner=False)
+@st.cache_data(ttl=45, show_spinner=False)
+def _load_all() -> dict:
+    return get_store().read_all()  # un seul appel Google pour tous les onglets
+
+
 def load(table: str) -> pd.DataFrame:
-    return get_store().read(table)
+    return _load_all()[table]
 
 
 def refresh():
-    load.clear()
+    _load_all.clear()
 
 
 def refs() -> dict:
@@ -105,6 +131,12 @@ def pdf_name(da: dict) -> str:
 
 
 # --------------------------------------------------------------------------- connexion
+def _pin(v) -> str:
+    """PIN normalisé : sans espaces ; 0123 et 123 équivalents (Sheets supprime les zéros)."""
+    s = as_text(v).replace(" ", "")
+    return s.lstrip("0") or s if s.isdigit() else s
+
+
 def login():
     if LOGO:
         st.image(str(LOGO), width=150)
@@ -122,12 +154,12 @@ def login():
         pin = st.text_input("Code PIN", type="password")
         ok = st.form_submit_button("Se connecter", type="primary")
     if ok:
-        if nom == "Administrateur (secours)" and pin == admin_pin:
+        if nom == "Administrateur (secours)" and _pin(pin) == _pin(admin_pin):
             st.session_state.user = {"Nom": "Administrateur", "Rôle": "Admin", "Email": "",
                                      "Chantier": "", "Service": ""}
             st.rerun()
         row = users[users["Nom"].map(as_text) == nom]
-        if len(row) and as_text(row.iloc[0]["PIN"]) and pin == as_text(row.iloc[0]["PIN"]):
+        if len(row) and _pin(row.iloc[0]["PIN"]) and _pin(pin) == _pin(row.iloc[0]["PIN"]):
             st.session_state.user = {k: as_text(row.iloc[0][k]) for k in
                                      ["Nom", "Rôle", "Email", "Chantier", "Service"]}
             st.rerun()
