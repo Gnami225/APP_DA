@@ -42,7 +42,18 @@ def _service_account():
     raw = _secret("GCP_JSON")
     if raw:
         import json
-        return json.loads(raw)
+        if isinstance(raw, dict):  # GCP_JSON saisi comme table TOML
+            return dict(raw)
+        txt = str(raw)
+        start, end = txt.find("{"), txt.rfind("}")
+        try:
+            if start < 0 or end < start:
+                raise ValueError("pas d'accolades")
+            return json.loads(txt[start:end + 1], strict=False)  # tolère les vrais retours à la ligne
+        except ValueError:
+            st.error("Le secret GCP_JSON n'est pas un JSON valide : collez tout le contenu du fichier "
+                     ".json de la clé, de la première { à la dernière }, sans rien y ajouter.")
+            st.stop()
     sa = _secret("gcp_service_account")
     return dict(sa) if sa else None
 
