@@ -158,6 +158,26 @@ class GoogleSheetStore:
             batch.append({"range": a1, "values": [[_clean(val)]]})
         _retry(ws.batch_update, batch)  # raw=True par défaut : valeurs écrites telles quelles
 
+    def update_many(self, table: str, key_col: str, changes: dict[str, dict]):
+        """Plusieurs lignes en 2 appels Google : lecture des clés, puis écriture groupée."""
+        if not changes:
+            return
+        import gspread
+
+        ws = self._ws[table]
+        header = self._headers[table]
+        keys = [str(k) for k in _retry(ws.col_values, header.index(key_col) + 1)]
+        batch = []
+        for key, values in changes.items():
+            try:
+                row = keys.index(str(key)) + 1
+            except ValueError as exc:
+                raise KeyError(f"{key} introuvable dans {table}") from exc
+            for col, val in values.items():
+                a1 = gspread.utils.rowcol_to_a1(row, header.index(col) + 1)
+                batch.append({"range": a1, "values": [[_clean(val)]]})
+        _retry(ws.batch_update, batch)
+
 
 class ExcelStore:
     """Backend fichier Excel local : tests, ou serveur sur un PC du bureau."""
@@ -243,3 +263,7 @@ class ExcelStore:
                     wb.save(self.path)
                     return
             raise KeyError(f"{key} introuvable dans {table}")
+
+    def update_many(self, table: str, key_col: str, changes: dict[str, dict]):
+        for key, values in changes.items():
+            self.update(table, key_col, key, values)
