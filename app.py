@@ -14,12 +14,13 @@ import pandas as pd
 import streamlit as st
 
 from logic import as_text, build_da, decide, fmt_date, is_true, send_email, to_date
-from pdf import build_pdf
+from pdf import build_pdf, find_logo
 from schema import COLISAGES, PRIORITES, ROLES_VALIDATION, STATUTS, STATUTS_LIGNE
 from storage import ExcelStore, GoogleSheetStore
 
 APP_DIR = Path(__file__).resolve().parent
-st.set_page_config(page_title="DA Chantier PWC", page_icon=str(APP_DIR / "logo.png"),
+LOGO = find_logo()
+st.set_page_config(page_title="DA Chantier PWC", page_icon=str(LOGO) if LOGO else "📋",
                    layout="centered")
 st.markdown("""<style>
 div.block-container{padding-top:1.2rem;padding-bottom:3rem}
@@ -80,7 +81,8 @@ def pdf_name(da: dict) -> str:
 
 # --------------------------------------------------------------------------- connexion
 def login():
-    st.image(str(APP_DIR / "logo.png"), width=150)
+    if LOGO:
+        st.image(str(LOGO), width=150)
     st.subheader("Demandes d'achat chantier")
     users = load("UTILISATEURS")
     users = users[users["Actif"].map(lambda v: as_text(v) == "" or is_true(v))]
