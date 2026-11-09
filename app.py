@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from acces import POSTES, Garde, ligne_txt, normalise, nouveau_code, trouve_poste
 from logic import as_text, build_da, decide, fmt_date, is_true, send_email, to_date
 from pdf import build_pdf, find_logo
 from schema import ANCIENS_STATUTS, COLISAGES, PRIORITES, ROLES_ADMIN, STATUTS, STATUTS_LIGNE
@@ -105,8 +106,21 @@ def get_store():
     return ExcelStore(path)
 
 
+@st.cache_resource(show_spinner=False)
+def _services_pwc() -> bool:
+    """Ajoute dans SERVICES les 5 services PWC s'ils manquent (une fois par démarrage)."""
+    store = get_store()
+    sv = store.read("SERVICES")
+    presents = set(sv["Code Service"].map(as_text))
+    manquants = [{"Code Service": code, "Libellé": nom} for nom, code in POSTES.items() if code not in presents]
+    if manquants:
+        store.append("SERVICES", manquants)
+    return True
+
+
 @st.cache_data(ttl=45, show_spinner=False)
 def _load_all() -> dict:
+    _services_pwc()
     return get_store().read_all()  # un seul appel Google pour tous les onglets
 
 
@@ -147,10 +161,9 @@ def pdf_name(da: dict) -> str:
 
 
 # --------------------------------------------------------------------------- connexion
-def _pin(v) -> str:
-    """PIN normalisé : sans espaces ; 0123 et 123 équivalents (Sheets supprime les zéros)."""
-    s = as_text(v).replace(" ", "")
-    return s.lstrip("0") or s if s.isdigit() else s
+@st.cache_resource
+def garde() -> Garde:
+    return Garde()
 
 
 def login():
@@ -161,25 +174,40 @@ def login():
     users = users.loc[users["Actif"].map(lambda v: as_text(v) == "" or is_true(v)).astype(bool)]
     noms = sorted(users["Nom"].map(as_text).loc[lambda s: s != ""].unique())
     admin_pin = as_text(_secret("ADMIN_PIN", ""))
-    choix = noms + (["Administrateur (secours)"] if admin_pin else [])
-    if not choix:
-        st.error("Aucun utilisateur actif. Renseignez l'onglet UTILISATEURS (Nom, Rôle, PIN).")
+    if not noms and not admin_pin:
+        st.error("Aucun utilisateur actif. Connectez-vous en administrateur pour créer les accès.")
         st.stop()
+    poste_de = {as_text(r["Nom"]): (as_text(r["Poste"]) if as_text(r["Poste"]) in POSTES else "Autres")
+                for _, r in users.iterrows()}
+    postes_presents = [p for p in POSTES if p in poste_de.values()]
+    if "Autres" in poste_de.values() or admin_pin:
+        postes_presents.append("Autres")
     with st.form("login"):
-        nom = st.selectbox("Votre nom", choix)
-        pin = st.text_input("Code PIN", type="password")
+        poste = st.selectbox("Votre poste", postes_presents, index=None, placeholder="Choisir votre poste")
+        pin = st.text_input("Code d'accès", type="password")
         ok = st.form_submit_button("Se connecter", type="primary")
     if ok:
-        if nom == "Administrateur (secours)" and _pin(pin) == _pin(admin_pin):
+        if not poste:
+            st.error("Choisissez votre poste.")
+            st.stop()
+        cle = f"poste:{poste}"
+        attente = garde().bloque(cle)
+        if attente:
+            st.error(f"Trop de codes incorrects pour ce poste. Réessayez dans {attente // 60 + 1} min.")
+            st.stop()
+        if poste == "Autres" and admin_pin and normalise(pin) == normalise(admin_pin):
+            garde().succes(cle)
             st.session_state.user = {"Nom": "Administrateur", "Rôle": "Admin", "Email": "",
                                      "Chantier": "", "Service": ""}
             st.rerun()
-        row = users[users["Nom"].map(as_text) == nom]
-        if len(row) and _pin(row.iloc[0]["PIN"]) and _pin(pin) == _pin(row.iloc[0]["PIN"]):
-            st.session_state.user = {k: as_text(row.iloc[0][k]) for k in
-                                     ["Nom", "Rôle", "Email", "Chantier", "Service"]}
-            st.rerun()
-        st.error("Nom ou code PIN incorrect.")
+        code = normalise(pin)
+        for _, r in users.iterrows():
+            if code and poste_de.get(as_text(r["Nom"])) == poste and normalise(r["PIN"]) == code:
+                garde().succes(cle)
+                st.session_state.user = {k: as_text(r[k]) for k in ["Nom", "Rôle", "Email", "Chantier", "Service"]}
+                st.rerun()
+        garde().echec(cle)
+        st.error("Poste ou code incorrect.")
     st.stop()
 
 
@@ -365,7 +393,7 @@ def _num(v):
         return as_text(v)
 
 
-def onglet_admin(user: dict):
+def onglet_admin_da(user: dict):
     da = load("DA")
     if not len(da):
         st.info("Aucune DA pour le moment.")
@@ -486,6 +514,166 @@ def onglet_admin(user: dict):
                 st.rerun()
             else:
                 st.info("Aucune modification à enregistrer.")
+
+
+def onglet_admin(user: dict):
+    t1, t2 = st.tabs(["Demandes d'achat", "Utilisateurs & accès"])
+    with t1:
+        onglet_admin_da(user)
+    with t2:
+        onglet_acces(user)
+
+
+def _creer_acces(personnes: list[dict]) -> tuple[list[str], list[str]]:
+    """Crée les accès ; retourne (lignes txt créées, erreurs)."""
+    users = load("UTILISATEURS")
+    noms = {as_text(n).lower() for n in users["Nom"]}
+    codes = {normalise(c) for c in users["PIN"] if as_text(c)}
+    rows, lignes, erreurs = [], [], []
+    for p in personnes:
+        nom = p["Nom"].strip()
+        poste = trouve_poste(p["Poste"])
+        if not nom or not poste:
+            erreurs.append(f"« {nom or '?'} » : poste non reconnu « {p['Poste']} » "
+                           f"(attendu : {', '.join(POSTES)})")
+            continue
+        p = {**p, "Poste": poste, "Service": POSTES[poste]}
+        if nom.lower() in noms:
+            erreurs.append(f"« {nom} » existe déjà (un nom doit être unique)")
+            continue
+        code = nouveau_code(p["Poste"].strip(), codes)
+        codes.add(code)
+        noms.add(nom.lower())
+        rows.append({"Email": p.get("Email", ""), "Nom": nom, "Rôle": p.get("Rôle") or "Demandeur",
+                     "Chantier": p.get("Chantier", ""), "Service": p.get("Service", ""),
+                     "Actif": "TRUE", "PIN": code, "Poste": p["Poste"].strip()})
+        lignes.append(ligne_txt(nom, p["Poste"].strip(), code))
+    if rows:
+        get_store().append("UTILISATEURS", rows)
+        refresh()
+    return lignes, erreurs
+
+
+def onglet_acces(user: dict):
+    ch_codes = [""] + load("CHANTIERS")["Code Chantier"].map(as_text).loc[lambda s: s != ""].tolist()
+    postes = list(POSTES)
+    st.session_state.setdefault("acces_crees", [])
+    for e in st.session_state.pop("acces_err", []):
+        st.error(e)
+
+    # --- accès créés dans cette session : à transmettre
+    if st.session_state.acces_crees:
+        st.markdown("##### Accès à transmettre")
+        txt = "\n".join(st.session_state.acces_crees)
+        st.code(txt, language=None)
+        c1, c2 = st.columns(2)
+        c1.download_button("Télécharger (.txt)", txt.encode("utf-8"), file_name=f"Acces_DA_{date.today():%Y%m%d}.txt",
+                           mime="text/plain", type="primary")
+        if c2.button("Vider la liste"):
+            st.session_state.acces_crees = []
+            st.rerun()
+        st.caption("Envoyez à chaque personne sa ligne en message privé, puis supprimez ce fichier.")
+
+    # --- création unitaire
+    st.markdown("##### Créer un accès")
+    with st.form("acces1", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        nom = c1.text_input("Nom et prénom")
+        poste = c2.selectbox("Poste", postes, index=None, placeholder="Choisir")
+        c1, c2 = st.columns(2)
+        chantier = c1.selectbox("Chantier", ch_codes, format_func=lambda c: c or "— aucun —")
+        role = c2.selectbox("Rôle", ["Demandeur", "Admin"])
+        email = st.text_input("Email (facultatif, pour les notifications)")
+        if st.form_submit_button("Créer l'accès", type="primary"):
+            lignes, erreurs = _creer_acces([{"Nom": nom, "Poste": poste or "", "Chantier": chantier,
+                                             "Rôle": role, "Email": email.strip()}])
+            st.session_state.acces_err = erreurs
+            if lignes:
+                st.session_state.acces_crees += lignes
+                st.rerun()
+
+    # --- création en masse
+    with st.expander("Créer plusieurs accès d'un coup"):
+        st.caption("Une personne par ligne : Nom ; Poste ; Code chantier (facultatif). "
+                   f"Postes : {', '.join(f'{n} ({c})' for n, c in POSTES.items())}. "
+                   "Exemple : Koné Ibrahim ; Parc matériel ; TORTIYA")
+        bloc = st.text_area("Liste", height=160, key="acces_bloc")
+        if st.button("Créer tous les accès", type="primary"):
+            personnes = []
+            for ln in bloc.splitlines():
+                if not ln.strip():
+                    continue
+                parts = [x.strip() for x in ln.split(";")] + ["", "", ""]
+                personnes.append({"Nom": parts[0], "Poste": parts[1], "Chantier": parts[2].upper()})
+            lignes, erreurs = _creer_acces(personnes)
+            st.session_state.acces_err = erreurs
+            if lignes:
+                st.session_state.acces_crees += lignes
+                st.rerun()
+
+    # --- liste et modification
+    st.markdown("##### Utilisateurs")
+    users = load("UTILISATEURS")
+    if not len(users):
+        st.info("Aucun utilisateur.")
+        return
+    cols = ["Nom", "Poste", "Rôle", "Chantier", "Service", "Actif", "Email", "PIN"]
+    vue = users[cols].copy()
+    for c in cols:
+        vue[c] = vue[c].map(as_text)
+    vue["Actif"] = vue["Actif"].map(lambda v: v == "" or is_true(v))
+    vue = vue.sort_values(["Actif", "Nom"], ascending=[False, True])
+    version = st.session_state.get("acc_v", 0)
+    ed = st.data_editor(
+        vue, hide_index=True, width="stretch", key=f"acc-ed-{version}",
+        disabled=["Nom", "PIN", "Service"],
+        column_config={
+            "Poste": st.column_config.SelectboxColumn(options=postes),
+            "Rôle": st.column_config.SelectboxColumn(options=["Demandeur", "Admin"], required=True),
+            "Chantier": st.column_config.SelectboxColumn(options=ch_codes),
+            "Service": st.column_config.TextColumn(help="Suit automatiquement le poste"),
+            "Actif": st.column_config.CheckboxColumn(help="Décocher pour couper l'accès"),
+            "PIN": st.column_config.TextColumn("Code d'accès"),
+        })
+    c1, c2 = st.columns(2)
+    if c1.button("Enregistrer les modifications", key="acc-save", type="primary"):
+        avant, apres = vue.set_index("Nom"), ed.set_index("Nom")
+        changes = {}
+        for n in apres.index:
+            diff = {}
+            for c in ["Poste", "Rôle", "Chantier", "Email"]:
+                if as_text(apres.at[n, c]) != as_text(avant.at[n, c]):
+                    diff[c] = as_text(apres.at[n, c])
+            if diff.get("Poste") in POSTES:
+                diff["Service"] = POSTES[diff["Poste"]]
+            if bool(apres.at[n, "Actif"]) != bool(avant.at[n, "Actif"]):
+                diff["Actif"] = "TRUE" if bool(apres.at[n, "Actif"]) else "FALSE"
+            if diff:
+                changes[n] = diff
+        if changes:
+            get_store().update_many("UTILISATEURS", "Nom", changes)
+            refresh()
+            st.session_state.acc_v = version + 1
+            st.rerun()
+        else:
+            st.info("Aucune modification à enregistrer.")
+    actifs = ed.loc[ed["Actif"].astype(bool)]
+    tout = "\n".join(ligne_txt(r["Nom"], r["Poste"], r["PIN"]) for _, r in actifs.iterrows() if r["PIN"])
+    c2.download_button("Exporter tous les accès actifs (.txt)", tout.encode("utf-8"),
+                       file_name=f"Acces_DA_tous_{date.today():%Y%m%d}.txt", mime="text/plain")
+
+    # --- nouveau code
+    with st.expander("Générer un nouveau code (code perdu ou divulgué)"):
+        qui = st.selectbox("Utilisateur", vue["Nom"].tolist(), index=None, placeholder="Choisir")
+        if st.button("Générer un nouveau code", disabled=not qui):
+            r = vue.loc[vue["Nom"] == qui].iloc[0]
+            code = nouveau_code(r["Poste"] or "Utilisateur", {normalise(c) for c in vue["PIN"] if c})
+            get_store().update_many("UTILISATEURS", "Nom", {qui: {"PIN": code}})
+            refresh()
+            st.session_state.acces_crees += [ligne_txt(qui, r["Poste"], code)]
+            st.session_state.acc_v = version + 1
+            st.rerun()
+        st.caption("L'ancien code ne fonctionne plus dès que le nouveau est généré.")
 
 
 def onglet_analyses():
