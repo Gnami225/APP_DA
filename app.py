@@ -5,6 +5,7 @@ Données : Google Sheet (si les secrets sont configurés) sinon fichier Excel lo
 """
 from __future__ import annotations
 
+import difflib
 import io
 import os
 from datetime import date
@@ -346,8 +347,8 @@ def articles_proches(saisie: str, desigs: list, n: int = 6) -> list:
     return [d for _, d in res[:n]]
 
 
-def _choisir_article(d: str):
-    st.session_state["art-des"] = d
+def _choisir(cle: str, valeur: str):
+    st.session_state[cle] = valeur
 
 
 def onglet_nouvelle(user: dict):
@@ -399,53 +400,76 @@ def onglet_nouvelle(user: dict):
     cat = {as_text(a["Code Article"]): a for _, a in art.iterrows()}
     hist = load("HISTORIQUE_ARTICLES")
     parcs = sorted((set(load("PARC")["Code_Parc"].map(as_text)) | set(hist["Code_Parc"].map(as_text))) - {""})
-    # libellé affiché = désignation + référence (ex. « PNEU — 13R22.5 ») : plusieurs articles
-    # peuvent avoir la même désignation, la référence les distingue
-    par_des = {}
-    for c, a in cat.items():
-        d, rf = as_text(a["Désignation"]), as_text(a.get("Référence"))
-        par_des.setdefault(f"{d} — {rf}" if rf else d, c)
-    desigs = sorted(par_des)  # uniquement l'onglet ARTICLES de la base
+    # catalogue : désignation -> {référence -> code article}
+    refs_de = {}
+    for c, x in cat.items():
+        refs_de.setdefault(as_text(x["Désignation"]), {}).setdefault(as_text(x.get("Référence")), c)
+    desigs = sorted(refs_de)  # uniquement l'onglet ARTICLES de la base
 
-    # choix libre : on prend dans la liste OU on tape sa propre désignation
+    # 1) Désignation : choisir dans la liste OU saisir librement
     des = st.selectbox("Désignation", desigs, index=None, accept_new_options=True, key="art-des",
-                       placeholder="Choisir dans la liste ou taper librement (désignation ou référence)")
-    code = par_des.get(as_text(des)) if des else None
-    if des and not code:
-        code = par_des.get(" ".join(as_text(des).upper().split()))
-    if code:  # article du catalogue : la désignation enregistrée est sans la référence
-        des = as_text(cat[code]["Désignation"])
-    if des and not code:  # texte libre : proposer les articles standard les plus proches
-        props = articles_proches(des, list(par_des))
+                       placeholder="Choisir dans la liste ou taper librement")
+    if des:
+        des = " ".join(as_text(des).upper().split())
+    connue = bool(des) and des in refs_de
+    if des and not connue:  # texte libre : proposer les désignations standard les plus proches
+        props = articles_proches(des, desigs)
         if props:
-            st.info("Articles de la liste standard proches de votre saisie — cliquez pour le reprendre :")
+            st.info("Désignations de la liste standard proches de votre saisie — cliquez pour la reprendre :")
             for i, p in enumerate(props):
-                st.button(p, key=f"prop-{i}-{p}", on_click=_choisir_article, args=(p,), width="stretch")
+                st.button(p, key=f"prop-{i}-{p}", on_click=_choisir, args=("art-des", p), width="stretch")
             st.caption("Sinon, continuez : votre désignation sera enregistrée telle quelle.")
+
+    # 2) Référence : liste filtrée sur la désignation choisie, ou saisie libre
+    refs_dispo = refs_de.get(des, {}) if connue else {}
+    opts = sorted(r for r in refs_dispo if r)
+    cle_ref = f"art-ref-{des or ''}"
+    ref = st.selectbox("Référence", opts, index=None, accept_new_options=True, key=cle_ref, disabled=not des,
+                       placeholder=(f"{len(opts)} référence(s) pour cette désignation : choisir ou taper"
+                                    if opts else "Taper la référence (facultatif)"))
+    ref = " ".join(as_text(ref).upper().split()) if ref else ""
+    if ref and opts and ref not in refs_dispo:
+        proches = difflib.get_close_matches(ref, opts, n=4, cutoff=0.5)
+        if proches:
+            st.caption("Références proches dans la liste :")
+            cols = st.columns(len(proches))
+            for i, p in enumerate(proches):
+                cols[i].button(p, key=f"pref-{i}-{p}", on_click=_choisir, args=(cle_ref, p), width="stretch")
+
+    code = refs_dispo.get(ref) if connue else None
+    if connue and not code and not ref and "" in refs_dispo:
+        code = refs_dispo[""]
     a = cat.get(code, {}) if code else {}
-    ref_def, col_def = as_text(a.get("Référence")), as_text(a.get("Colisage"))
-    with st.form(f"ajout-{code or des or ''}", clear_on_submit=True):
+    col_def = as_text(a.get("Colisage"))
+    if not col_def and connue:  # même colisage pour toutes les références de la désignation
+        cols_des = {as_text(cat[c].get("Colisage")) for c in refs_dispo.values()} - {""}
+        col_def = cols_des.pop() if len(cols_des) == 1 else ""
+    if des:
+        st.caption(f"✓ Article du catalogue {code}" if code else "Article hors catalogue (sans code)")
+
+    with st.form(f"ajout-{des or ''}-{ref}", clear_on_submit=True):
         a1, a2 = st.columns(2)
-        refa = a1.text_input("Référence", value=ref_def)
-        parc = a2.selectbox("Code parc (engin)", parcs, index=None, accept_new_options=True,
-                            placeholder="Facultatif")
         colis = a1.selectbox("Colisage", COLISAGES, index=COLISAGES.index(col_def) if col_def in COLISAGES else 0)
         qte = a2.number_input("Quantité", min_value=0.0, step=1.0, value=1.0)
-        usage = st.text_input("Usage")
+        parc = a1.selectbox("Code parc (engin)", parcs, index=None, accept_new_options=True,
+                            placeholder="Facultatif")
+        usage = a2.text_input("Usage")
         if st.form_submit_button("Ajouter l'article", type="primary"):
             if not des or qte <= 0 or not usage.strip():
                 st.error("Désignation, quantité et usage sont obligatoires.")
             else:
                 st.session_state.lignes.append({
-                    "Code Article": code or "", "Désignation": " ".join(des.split()),
-                    "Référence": refa.strip(), "Code_Parc": (parc or "").strip(), "Colisage": colis,
+                    "Code Article": code or "", "Désignation": des, "Référence": ref,
+                    "Code_Parc": (parc or "").strip(), "Colisage": colis,
                     "Quantité": qte, "Usage": usage.strip()})
                 st.session_state.pop("art-des", None)
+                st.session_state.pop(cle_ref, None)
                 st.rerun()
 
     for i, l in enumerate(st.session_state.lignes):
         a, b = st.columns([6, 1])
-        a.markdown(f"**{i + 1}. {l['Désignation']}** — {l['Quantité']:g} {l['Colisage']}"
+        rf = f" · {l['Référence']}" if l.get("Référence") else ""
+        a.markdown(f"**{i + 1}. {l['Désignation']}{rf}** — {l['Quantité']:g} {l['Colisage']}"
                    f"{' · ' + l['Code_Parc'] if l['Code_Parc'] else ''}  \n{l['Usage']}")
         if b.button("✕", key=f"del-{i}", help="Retirer"):
             st.session_state.lignes.pop(i)
