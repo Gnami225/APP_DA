@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from acces import POSTES, Garde, ligne_txt, normalise, nouveau_code, trouve_poste
+from acces import POSTES, Garde, creer_jeton, ligne_txt, lire_jeton, normalise, nouveau_code, trouve_poste
 from logic import as_text, build_da, decide, fmt_date, is_true, send_email, to_date
 from pdf import build_pdf, find_logo
 from schema import ANCIENS_STATUTS, COLISAGES, PRIORITES, ROLES_ADMIN, STATUTS, STATUTS_LIGNE
@@ -174,6 +174,62 @@ def garde() -> Garde:
     return Garde()
 
 
+ADMIN_SECOURS = "__admin__"
+
+
+def _secret_session() -> str:
+    """Clé de signature des jetons : SESSION_SECRET si défini, sinon dérivée des secrets existants."""
+    import hashlib
+
+    explicite = as_text(_secret("SESSION_SECRET", ""))
+    if explicite:
+        return explicite
+    base = "|".join([as_text(_secret("GCP_JSON", "")), str(_secret("gcp_service_account", "")),
+                     as_text(_secret("ADMIN_PIN", "")), as_text(_secret("SHEET_ID", "")), "pwc-da"])
+    return hashlib.sha256(base.encode()).hexdigest()
+
+
+def _user_dict(nom: str) -> dict | None:
+    if nom == ADMIN_SECOURS:
+        return {"Nom": "Administrateur", "Rôle": "Admin", "Email": "", "Chantier": "", "Service": ""}
+    users = load("UTILISATEURS")
+    r = users.loc[users["Nom"].map(as_text) == nom]
+    if not len(r):
+        return None
+    r = r.iloc[0]
+    if not (as_text(r["Actif"]) == "" or is_true(r["Actif"])):
+        return None
+    return {k: as_text(r[k]) for k in ["Nom", "Rôle", "Email", "Chantier", "Service"]}
+
+
+def _code_actuel(nom: str) -> str | None:
+    if nom == ADMIN_SECOURS:
+        return as_text(_secret("ADMIN_PIN", "")) or None
+    if not _user_dict(nom):
+        return None
+    users = load("UTILISATEURS")
+    return as_text(users.loc[users["Nom"].map(as_text) == nom].iloc[0]["PIN"]) or None
+
+
+def ouvrir_session(nom: str, code: str):
+    """Connecte l'utilisateur et mémorise un jeton signé dans l'adresse (survit à l'actualisation)."""
+    st.session_state.user = _user_dict(nom)
+    st.query_params["s"] = creer_jeton(nom, code, _secret_session())
+    st.rerun()
+
+
+def restaurer_session():
+    jeton = st.query_params.get("s")
+    if not jeton or "user" in st.session_state:
+        return
+    nom = lire_jeton(jeton, _secret_session(), _code_actuel)
+    user = _user_dict(nom) if nom else None
+    if user:
+        st.session_state.user = user
+    else:
+        del st.query_params["s"]  # jeton expiré, code changé ou accès coupé
+
+
 def login():
     if LOGO:
         st.image(str(LOGO), width=150)
@@ -205,15 +261,12 @@ def login():
             st.stop()
         if poste == "Autres" and admin_pin and normalise(pin) == normalise(admin_pin):
             garde().succes(cle)
-            st.session_state.user = {"Nom": "Administrateur", "Rôle": "Admin", "Email": "",
-                                     "Chantier": "", "Service": ""}
-            st.rerun()
+            ouvrir_session(ADMIN_SECOURS, admin_pin)
         code = normalise(pin)
         for _, r in users.iterrows():
             if code and poste_de.get(as_text(r["Nom"])) == poste and normalise(r["PIN"]) == code:
                 garde().succes(cle)
-                st.session_state.user = {k: as_text(r[k]) for k in ["Nom", "Rôle", "Email", "Chantier", "Service"]}
-                st.rerun()
+                ouvrir_session(as_text(r["Nom"]), as_text(r["PIN"]))
         garde().echec(cle)
         st.error("Poste ou code incorrect.")
     st.stop()
@@ -260,6 +313,43 @@ def tableau_da(df: pd.DataFrame):
 
 
 # --------------------------------------------------------------------------- onglets
+def _sans_accent(t: str) -> str:
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(t).upper())
+    return "".join(c for c in t if not unicodedata.combining(c))
+
+
+def articles_proches(saisie: str, desigs: list, n: int = 6) -> list:
+    """Articles du catalogue les plus proches d'une saisie libre (mots communs + ressemblance)."""
+    import difflib, re
+    q = _sans_accent(saisie)
+    mots = [m for m in re.findall(r"[A-Z0-9/.]+", q) if len(m) > 1 or m.isdigit()]
+    if not mots:
+        return []
+    res = []
+    for d in desigs:
+        dn = _sans_accent(d)
+        toks = re.findall(r"[A-Z0-9/.]+", dn)
+        nums = set(re.findall(r"\d+(?:[.,]\d+)?", dn))
+
+        def trouve(m):
+            if m.isdigit():
+                return m in nums
+            return any(t.startswith(m) or (m.isalpha() and len(m) > 3 and t.startswith(m[:-1])) for t in toks)
+        commun = sum(1 for m in mots if trouve(m))
+        m0 = mots[0]  # le premier mot (l'objet) doit ouvrir la désignation
+        if not commun or not (m0 in nums if m0.isdigit() else any(t.startswith(m0[:max(3, len(m0) - 1)]) for t in toks[:2])):
+            continue
+        score = commun / len(mots) + 0.3 * difflib.SequenceMatcher(None, q, dn).ratio()
+        res.append((score, d))
+    res.sort(key=lambda x: -x[0])
+    return [d for _, d in res[:n]]
+
+
+def _choisir_article(d: str):
+    st.session_state["art-des"] = d
+
+
 def onglet_nouvelle(user: dict):
     if "lignes" not in st.session_state:
         st.session_state.lignes = []
@@ -305,26 +395,53 @@ def onglet_nouvelle(user: dict):
 
     st.markdown("##### Articles")
     art = load("ARTICLES")
+    art = art.loc[art["Code Article"].map(as_text) != ""]
+    cat = {as_text(a["Code Article"]): a for _, a in art.iterrows()}
     hist = load("HISTORIQUE_ARTICLES")
-    desigs = sorted((set(art["Désignation"].map(as_text)) | set(hist["Désignation"].map(as_text))) - {""})
     parcs = sorted((set(load("PARC")["Code_Parc"].map(as_text)) | set(hist["Code_Parc"].map(as_text))) - {""})
-    with st.form("ajout", clear_on_submit=True):
-        des = st.selectbox("Désignation", desigs, index=None, accept_new_options=True,
-                           placeholder="Choisir ou taper une désignation")
+    # libellé affiché = désignation + référence (ex. « PNEU — 13R22.5 ») : plusieurs articles
+    # peuvent avoir la même désignation, la référence les distingue
+    par_des = {}
+    for c, a in cat.items():
+        d, rf = as_text(a["Désignation"]), as_text(a.get("Référence"))
+        par_des.setdefault(f"{d} — {rf}" if rf else d, c)
+    desigs = sorted(par_des)  # uniquement l'onglet ARTICLES de la base
+
+    # choix libre : on prend dans la liste OU on tape sa propre désignation
+    des = st.selectbox("Désignation", desigs, index=None, accept_new_options=True, key="art-des",
+                       placeholder="Choisir dans la liste ou taper librement (désignation ou référence)")
+    code = par_des.get(as_text(des)) if des else None
+    if des and not code:
+        code = par_des.get(" ".join(as_text(des).upper().split()))
+    if code:  # article du catalogue : la désignation enregistrée est sans la référence
+        des = as_text(cat[code]["Désignation"])
+    if des and not code:  # texte libre : proposer les articles standard les plus proches
+        props = articles_proches(des, list(par_des))
+        if props:
+            st.info("Articles de la liste standard proches de votre saisie — cliquez pour le reprendre :")
+            for i, p in enumerate(props):
+                st.button(p, key=f"prop-{i}-{p}", on_click=_choisir_article, args=(p,), width="stretch")
+            st.caption("Sinon, continuez : votre désignation sera enregistrée telle quelle.")
+    a = cat.get(code, {}) if code else {}
+    ref_def, col_def = as_text(a.get("Référence")), as_text(a.get("Colisage"))
+    with st.form(f"ajout-{code or des or ''}", clear_on_submit=True):
         a1, a2 = st.columns(2)
-        refa = a1.text_input("Référence")
+        refa = a1.text_input("Référence", value=ref_def)
         parc = a2.selectbox("Code parc (engin)", parcs, index=None, accept_new_options=True,
                             placeholder="Facultatif")
-        colis = a1.selectbox("Colisage", COLISAGES)
+        colis = a1.selectbox("Colisage", COLISAGES, index=COLISAGES.index(col_def) if col_def in COLISAGES else 0)
         qte = a2.number_input("Quantité", min_value=0.0, step=1.0, value=1.0)
         usage = st.text_input("Usage")
-        if st.form_submit_button("Ajouter l'article"):
+        if st.form_submit_button("Ajouter l'article", type="primary"):
             if not des or qte <= 0 or not usage.strip():
                 st.error("Désignation, quantité et usage sont obligatoires.")
             else:
-                st.session_state.lignes.append({"Désignation": des.strip(), "Référence": refa.strip(),
-                                                "Code_Parc": (parc or "").strip(), "Colisage": colis,
-                                                "Quantité": qte, "Usage": usage.strip()})
+                st.session_state.lignes.append({
+                    "Code Article": code or "", "Désignation": " ".join(des.split()),
+                    "Référence": refa.strip(), "Code_Parc": (parc or "").strip(), "Colisage": colis,
+                    "Quantité": qte, "Usage": usage.strip()})
+                st.session_state.pop("art-des", None)
+                st.rerun()
 
     for i, l in enumerate(st.session_state.lignes):
         a, b = st.columns([6, 1])
@@ -410,7 +527,6 @@ def onglet_admin_da(user: dict):
     k1.metric("Émises", int((da["Statut"] == "Émise").sum()))
     k2.metric("Validées", int((da["Statut"] == "Validée").sum()))
     k3.metric("Rejetées", int((da["Statut"] == "Rejetée").sum()))
-
     r = refs()
     c1, c2, c3 = st.columns([2, 2, 2])
     chs = c1.multiselect("Chantier", sorted(da["Chantier"].map(as_text).unique()),
@@ -704,13 +820,28 @@ def onglet_analyses():
     st.dataframe(pd.crosstab(da["Chantier"], da["Mois"]), width="stretch")
     st.markdown("##### DA par statut")
     st.dataframe(da["Statut"].value_counts().rename("DA"), width="stretch")
-    st.markdown("##### Articles les plus demandés")
     lg2 = lg.copy()
     lg2["Quantité"] = pd.to_numeric(lg2["Quantité"], errors="coerce")
+    art = load("ARTICLES")
+    fam = dict(zip(art["Code Article"].map(as_text), art["Famille"].map(as_text)))
+    lg2["Famille"] = lg2["Code Article"].map(lambda c: fam.get(as_text(c), "Hors catalogue"))
+    lg2["Référence"] = lg2["Référence"].map(as_text).replace("", "(sans référence)")
+
+    st.markdown("##### Commandes par famille")
+    st.dataframe(lg2.groupby("Famille").agg(Lignes=("ID_Ligne", "size"), DA=("ID_DA", "nunique"))
+                 .sort_values("DA", ascending=False), width="stretch")
+    st.markdown("##### Commandes par type d'article (désignation)")
     top = (lg2.groupby(["Désignation", "Colisage"])
-           .agg(Quantité=("Quantité", "sum"), DA=("ID_DA", "nunique"))
-           .sort_values("DA", ascending=False).head(20).reset_index())
-    st.dataframe(top, hide_index=True, width="stretch")
+           .agg(Quantité=("Quantité", "sum"), DA=("ID_DA", "nunique"), Références=("Référence", "nunique"))
+           .sort_values("DA", ascending=False).reset_index())
+    st.dataframe(top.head(30), hide_index=True, width="stretch")
+    choix = st.selectbox("Détail par référence pour", top["Désignation"].unique(), index=None,
+                         placeholder="Choisir un type d'article (ex. BETON PRET A L'EMPLOI)")
+    if choix:
+        det = (lg2.loc[lg2["Désignation"] == choix].groupby(["Référence", "Colisage"])
+               .agg(Quantité=("Quantité", "sum"), DA=("ID_DA", "nunique"))
+               .sort_values("Quantité", ascending=False).reset_index())
+        st.dataframe(det, hide_index=True, width="stretch")
 
     flat = lg.merge(da[["ID_DA", "Statut", "Priorité", "Demandeur", "Responsable", "Date besoin",
                         "Validé par", "Date validation", "Motif rejet"]], on="ID_DA", how="left")
@@ -725,6 +856,9 @@ def onglet_analyses():
 
 # --------------------------------------------------------------------------- main
 def main():
+    restaurer_session()
+    if (st.session_state.get("user") or {}).get("Rôle") == "Admin" and _u.get("Rôle") != "Admin":
+        st.set_page_config(layout="wide")  # session restaurée après actualisation
     if "user" not in st.session_state:
         login()
     user = st.session_state.user
@@ -735,6 +869,7 @@ def main():
                 f'<div class="u">{user["Nom"]}{badge}</div></div>', unsafe_allow_html=True)
     if h2.button("Quitter"):
         st.session_state.clear()
+        st.query_params.clear()
         st.rerun()
 
     noms = ["Nouvelle DA", "Mes DA"] + (["Administration", "Analyses"] if admin else [])
