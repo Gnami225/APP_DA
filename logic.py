@@ -163,9 +163,17 @@ def montant_ligne(qte, pu, remise_pct=0) -> float:
     return round(to_num(qte) * to_num(pu) * (1 - to_num(remise_pct) / 100), 2)
 
 
-def totaux(lignes: list[dict], taux_tva: float, appliquer_tva: bool = True) -> dict:
+def tva_ligne(l: dict, taux_defaut: float = 0) -> float:
+    """TVA d'une ligne : son propre taux (colonne « TVA % »), sinon le taux par défaut."""
+    t = l.get("TVA %")
+    taux = taux_defaut if t is None or as_text(t) == "" else to_num(t)
+    return montant_ligne(l.get("Quantité"), l.get("Prix unitaire HT"), l.get("Remise %")) * taux / 100
+
+
+def totaux(lignes: list[dict], taux_tva: float = 0, appliquer_tva: bool = True) -> dict:
+    """Totaux du BC ; la TVA est calculée ligne par ligne (taux propre à chaque article)."""
     ht = round(sum(montant_ligne(l.get("Quantité"), l.get("Prix unitaire HT"), l.get("Remise %")) for l in lignes))
-    tva = round(ht * taux_tva / 100) if appliquer_tva else 0
+    tva = round(sum(tva_ligne(l, taux_tva) for l in lignes)) if appliquer_tva else 0
     return {"Total HT": ht, "Montant TVA": tva, "Total TTC": ht + tva}
 
 
