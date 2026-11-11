@@ -153,18 +153,12 @@ def maj_lignes_da(ctx, ids_lignes: set[str]):
 
 # =========================================================================== onglet Achats
 def onglet_achats(ctx):
-    t1, t2, t3, t5, t4 = st.tabs(["DA à traiter", "Tableaux comparatifs (TCP)", "Bons de commande",
-                                  "Suivi livraisons", "Fournisseurs"])
-    with t1:
-        _vue_da(ctx)
-    with t2:
-        _vue_tcp(ctx)
-    with t3:
-        _vue_bc(ctx)
-    with t5:
-        onglet_livraisons(ctx)
-    with t4:
-        _vue_fournisseurs(ctx)
+    vues = {"Demandes d'achat (DA)": _vue_da, "Tableaux comparatifs (TCP)": _vue_tcp, "Bons de commande": _vue_bc}
+    if ctx.user["Rôle"] != "Acheteur":  # acheteur : DA, TCP et BC uniquement
+        vues.update({"Suivi livraisons": onglet_livraisons, "Fournisseurs": _vue_fournisseurs})
+    for tab, fn in zip(st.tabs(list(vues)), vues.values()):
+        with tab:
+            fn(ctx)
 
 
 def _vue_da(ctx):
