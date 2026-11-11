@@ -223,8 +223,8 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
                                            if statut in ("Rejeté", "Annulé") else "BC NON VALIDÉ — EN ATTENTE DE VALIDATION")
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=12 * mm, rightMargin=12 * mm,
                             topMargin=11 * mm, bottomMargin=12 * mm, title=numero or "Bon de commande", author=societe)
-    cw = [64 * mm, 34 * mm, 13 * mm, 15 * mm, 22 * mm, 14 * mm, 24 * mm]   # 186 mm
-    W1, W2, W3 = cw[0], sum(cw[1:5]), sum(cw[5:])
+    cw = [55 * mm, 29 * mm, 19 * mm, 12 * mm, 14 * mm, 21 * mm, 13 * mm, 23 * mm]   # 186 mm
+    W1, W2, W3 = 64 * mm, 84 * mm, 38 * mm
 
     # ---- en-tête
     soc = _p(f"REG. COMMERCE {as_text(param.get('Reg. Commerce'))}\nNCC : {as_text(param.get('N° CC'))}\n"
@@ -240,35 +240,34 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
         [soc, _p(f"<b>CHANTIER :</b>   {chantier_nom or ch}" + (f" ({ch})" if chantier_nom and chantier_nom != ch else ""),
                  "bc_l"), dat],
         [_p(f"Tél : {as_text(param.get('Téléphone'))}", "bc_l"),
-         _p(f"<b>CODE PARC :</b>   {as_text(bc.get('Code Parc'))}", "bc_l"),
-         _p(f"<b>Magasin :</b> {as_text(bc.get('Magasin'))}", "bc_l")],
+         _p(f"<b>Magasin :</b>   {as_text(bc.get('Magasin'))}", "bc_l"), ""],
         [_p(f"<b>Fournisseur :</b>   {as_text(bc.get('Fournisseur'))}", "bc_l"),
          _p(f"<b>DA N° :</b>   {as_text(bc.get('N° DA'))}", "bc_l"), ""],
     ], colWidths=[W1, W2, W3], rowHeights=[21 * mm, 17 * mm, 8 * mm, 8 * mm])
     head.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.8, GRID), ("INNERGRID", (0, 0), (-1, -1), 0.8, GRID),
-        ("SPAN", (1, 3), (2, 3)), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("SPAN", (1, 2), (2, 2)), ("SPAN", (1, 3), (2, 3)), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("LEFTPADDING", (2, 0), (2, 1), 0), ("RIGHTPADDING", (2, 0), (2, 1), 0),
         ("TOPPADDING", (2, 0), (2, 1), 0), ("BOTTOMPADDING", (2, 0), (2, 1), 0),
     ]))
     # « &nbsp; » pour les balises <b> : _p échappe le texte, on passe donc par Paragraph direct
-    for (r, c) in [(1, 1), (2, 1), (2, 2), (3, 0), (3, 1)]:
+    for (r, c) in [(1, 1), (2, 1), (3, 0), (3, 1)]:
         cell = head._cellvalues[r][c]
         cell.__init__(cell.text.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>"), cell.style)
     story = [head, Spacer(1, 3 * mm)]
 
     # ---- lignes
-    th = ["DÉSIGNATION", "RÉFÉRENCE", "QTÉ", "UNITÉ", "PRIX UNIT.\n(FCFA)", "REM. %", "MONTANT\n(FCFA)"]
+    th = ["DÉSIGNATION", "RÉFÉRENCE", "CODE PARC", "QTÉ", "UNITÉ", "PRIX UNIT.\n(FCFA)", "REM. %", "MONTANT\n(FCFA)"]
     data = [[_p(h, "th") for h in th]]
     lignes = sorted(lignes, key=lambda l: to_num(l.get("N° Ligne")))
     for l in lignes:
         rem = to_num(l.get("Remise %"))
         data.append([_p(l.get("Désignation"), "bc_l"), _p(l.get("Référence"), "bc_c"),
-                     _p(_qte(l.get("Quantité")), "bc_c"), _p(l.get("Unité"), "bc_c"),
+                     _p(l.get("Code_Parc"), "bc_c"), _p(_qte(l.get("Quantité")), "bc_c"), _p(l.get("Unité"), "bc_c"),
                      _p(fmt_montant(l.get("Prix unitaire HT")), "bc_r"), _p(_qte(rem) if rem else "", "bc_c"),
                      _p(fmt_montant(montant_ligne(l.get("Quantité"), l.get("Prix unitaire HT"), rem)), "bc_r")])
     for _ in range(len(lignes), NB_LIGNES_BC):
-        data.append([""] * 7)
+        data.append([""] * 8)
     det = Table(data, colWidths=cw, repeatRows=1)
     det.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.6, GRID), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -294,7 +293,7 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
          _p(fmt_montant(bc.get("Montant TVA")), "bc_rb")],
         ["", "", _p("TOTAL TTC", "bc_rb"), _p(fmt_montant(bc.get("Total TTC")), "bc_rb")],
         [_p("Mentionner T.V.A sur facture\nExemplaire à joindre à la facture", "bc_i"), "", _p(visa, "bc_i"), ""],
-    ], colWidths=[sum(cw[:3]), cw[3], cw[4] + cw[5], cw[6]],
+    ], colWidths=[sum(cw[:4]), cw[4], cw[5] + cw[6], cw[7]],
        rowHeights=[6 * mm, 6 * mm, 6 * mm, 20 * mm])
     pied.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.8, GRID),
@@ -323,9 +322,12 @@ def build_tcp_pdf(tcp: dict, fournisseurs: list[dict], lignes: list[dict], param
     W = 277 * mm
     noms = [as_text(f["Nom"]) for f in fournisseurs]
     nf = max(len(noms), 1)
-    fixe = [8 * mm, 62 * mm, 32 * mm, 13 * mm, 13 * mm]
-    reste = W - sum(fixe)
-    cw = fixe + [reste / nf * 0.42, reste / nf * 0.58] * nf
+    compact = nf > 4  # au-delà de 4 fournisseurs : prix unitaires seulement
+    fixe = [8 * mm, 49 * mm, 28 * mm, 14 * mm, 12 * mm]
+    w_ret = 30 * mm
+    reste = W - sum(fixe) - w_ret
+    sous = 1 if compact else 2
+    cw = fixe + ([reste / nf] if compact else [reste / nf * 0.42, reste / nf * 0.58]) * nf + [w_ret]
 
     num = Table([[_p("N°", "bc_cb")], [_p(numero, "bc_num")]], colWidths=[60 * mm], rowHeights=[8 * mm, 10 * mm])
     num.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, 0), 0.8, GRID), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
@@ -343,72 +345,94 @@ def build_tcp_pdf(tcp: dict, fournisseurs: list[dict], lignes: list[dict], param
     info.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.8, GRID), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
     story = [head, Spacer(1, 2 * mm), info, Spacer(1, 3 * mm)]
 
-    # ---- tableau des offres
+    # ---- tableau des offres (une ligne par article, fournisseur retenu par article)
     h1 = [_p(t, "th") for t in ["N°", "DÉSIGNATION", "RÉFÉRENCE", "UNITÉ", "QTÉ"]]
     h2 = ["", "", "", "", ""]
     for n in noms:
-        h1 += [_p(n, "th"), ""]
-        h2 += [_p("P.U. HT", "th"), _p("MONTANT HT", "th")]
+        h1 += [_p(n, "th")] + ([""] if not compact else [])
+        h2 += [_p("P.U. HT", "th")] if compact else [_p("P.U. HT", "th"), _p("MONTANT HT", "th")]
+    h1.append(_p("RETENU", "th"))
+    h2.append(_p("Fournisseur / montant", "th"))
     data = [h1, h2]
     tot = {n: 0.0 for n in noms}
-    gras = []
+    gras, coches, repart = [], [], {}
     for i, l in enumerate(lignes, start=1):
         prix = {n: to_num(l["prix"].get(n)) for n in noms}
         valides = {n: v for n, v in prix.items() if v > 0}
         mini = min(valides.values()) if valides else None
+        ret = as_text(l.get("retenu"))
         row = [_p(str(i), "bc_c"), _p(l.get("Désignation"), "bc_l"), _p(l.get("Référence"), "bc_c"),
                _p(l.get("Unité"), "bc_c"), _p(_qte(l.get("Quantité")), "bc_c")]
         for j, n in enumerate(noms):
             pu = prix[n]
             mt = montant_ligne(l.get("Quantité"), pu)
             tot[n] += mt
-            row += [_p(fmt_montant(pu) if pu else "—", "bc_r"), _p(fmt_montant(mt) if pu else "—", "bc_r")]
+            row += [_p(fmt_montant(pu) if pu else "—", "bc_r")]
+            if not compact:
+                row += [_p(fmt_montant(mt) if pu else "—", "bc_r")]
+            c = 5 + sous * j
             if mini is not None and pu == mini:
-                gras.append((5 + 2 * j, len(data)))
+                gras.append((c, len(data)))
+        if ret:
+            mt_ret = montant_ligne(l.get("Quantité"), prix.get(ret))
+            repart[ret] = repart.get(ret, 0) + mt_ret
+            row.append(_p(f"{ret}\n{fmt_montant(mt_ret)}", "bc_c"))
+        else:
+            row.append(_p("—", "bc_c"))
         data.append(row)
     n_l = len(data)
+    last = len(cw) - 1
+
     def ligne_tot(label, valeurs, style="bc_rb"):
         r = ["", _p(label, "bc_rb"), "", "", ""]
         for v in valeurs:
-            r += ["", _p(v, style)]
-        return r
+            r += ([_p(v, style)] if compact else ["", _p(v, style)])
+        return r + [""]
     tva = {n: round(tot[n] * taux / 100) for n in noms}
-    data.append(ligne_tot("TOTAL HT", [fmt_montant(tot[n]) for n in noms]))
+    total_ret = sum(repart.values())
+    r_ht = ligne_tot("TOTAL OFFRE HT", [fmt_montant(tot[n]) for n in noms])
+    r_ht[-1] = _p(fmt_montant(total_ret), "bc_rb")
+    data.append(r_ht)
     data.append(ligne_tot(f"TVA ({_qte(taux)} %)", [fmt_montant(tva[n]) for n in noms], "bc_r"))
-    data.append(ligne_tot("TOTAL TTC", [fmt_montant(tot[n] + tva[n]) for n in noms]))
+    r_ttc = ligne_tot("TOTAL OFFRE TTC", [fmt_montant(tot[n] + tva[n]) for n in noms])
+    r_ttc[-1] = _p(fmt_montant(total_ret + round(total_ret * taux / 100)), "bc_rb")
+    data.append(r_ttc)
     for lib, cle in [("Délai de livraison", "Délai"), ("Conditions de règlement", "Condition"), ("Observations", "Observation")]:
         r = ["", _p(lib, "bc_lb"), "", "", ""]
         for f in fournisseurs:
-            r += [_p(f.get(cle), "bc_c"), ""]
-        data.append(r)
+            r += [_p(f.get(cle), "bc_c")] + ([] if compact else [""])
+        data.append(r + [""])
     t = Table(data, colWidths=cw, repeatRows=2)
     st_ = [("GRID", (0, 0), (-1, -1), 0.6, GRID), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
            ("SPAN", (0, 0), (0, 1)), ("SPAN", (1, 0), (1, 1)), ("SPAN", (2, 0), (2, 1)),
-           ("SPAN", (3, 0), (3, 1)), ("SPAN", (4, 0), (4, 1))]
+           ("SPAN", (3, 0), (3, 1)), ("SPAN", (4, 0), (4, 1)),
+           ("LINEBEFORE", (last, 0), (last, -1), 1.4, GRID)]
     for j in range(nf):
-        c = 5 + 2 * j
-        st_.append(("SPAN", (c, 0), (c + 1, 0)))
-        for r in range(n_l + 3, n_l + 6):
-            st_.append(("SPAN", (c, r), (c + 1, r)))
+        c = 5 + sous * j
+        if not compact:
+            st_.append(("SPAN", (c, 0), (c + 1, 0)))
+            for r in range(n_l + 3, n_l + 6):
+                st_.append(("SPAN", (c, r), (c + 1, r)))
     for r in range(n_l, n_l + 6):
         st_.append(("SPAN", (1, r), (4, r)))
+    st_.append(("SPAN", (last, n_l + 3), (last, n_l + 5)))
     st_.append(("LINEABOVE", (0, n_l), (-1, n_l), 1.2, GRID))
-    for c, r in gras:  # meilleur prix de la ligne : cadre épais
-        st_.append(("BOX", (c, r), (c + 1, r), 1.6, GRID))
+    for c, r in gras:  # meilleur prix de l'article : cadre épais
+        st_.append(("BOX", (c, r), (c + sous - 1, r), 1.6, GRID))
     t.setStyle(TableStyle(st_))
     story.append(t)
 
     # ---- synthèse et visas
-    retenu = as_text(tcp.get("Fournisseur retenu"))
-    moins = as_text(tcp.get("Moins-disant"))
-    synth = (f"<b>Moins-disant :</b> {moins} ({fmt_montant(tcp.get('Montant moins-disant HT'))} FCFA HT)"
-             f"&nbsp;&nbsp;&nbsp;&nbsp;<b>Fournisseur retenu :</b> {retenu} "
-             f"({fmt_montant(tcp.get('Montant retenu HT'))} FCFA HT)")
+    rep = " ; ".join(f"{n} : {fmt_montant(v)}" for n, v in repart.items())
+    synth = (f"<b>Répartition retenue (HT) :</b> {_p(rep).text}&nbsp;&nbsp;&nbsp;<b>Total retenu :</b> "
+             f"{fmt_montant(total_ret)} FCFA HT&nbsp;&nbsp;&nbsp;<b>Meilleur prix par article :</b> "
+             f"{fmt_montant(tcp.get('Montant moins-disant HT'))} FCFA HT")
     motif = as_text(tcp.get("Motif choix"))
     story += [Spacer(1, 3 * mm), Paragraph(synth, _s["bc_l"])]
     if motif:
-        story.append(Paragraph(f"<b>Motif du choix :</b> {_p(motif).text}", _s["bc_l"]))
-    story.append(Paragraph("Le cadre épais signale le meilleur prix de chaque ligne.", _s["small"]))
+        story.append(Paragraph(f"<b>Motif des choix :</b> {_p(motif).text}", _s["bc_l"]))
+    story.append(Paragraph("Cadre épais : prix le plus bas de l'article. Colonne RETENU : fournisseur choisi "
+                           "pour l'article (un bon de commande par fournisseur retenu).", _s["small"]))
     visas = Table([[_p("ÉTABLI PAR (ACHATS)", "th"), _p("CONTRÔLE", "th"), _p("VALIDATION (DIRECTION)", "th")],
                    [_p(f"Nom : {as_text(tcp.get('Acheteur'))}\nDate : {fmt_date(tcp.get('Date TCP'))}\nSignature :"),
                     _p("Nom :\nDate :\nSignature :"), _p("Nom :\nDate :\nSignature :")]],
