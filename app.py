@@ -1021,7 +1021,9 @@ def main():
 
     role = user["Rôle"]
     ctx = contexte(user)
-    onglets = {"Nouvelle DA": lambda: onglet_nouvelle(user), "Mes DA": lambda: onglet_mes_da(user)}
+    # l'acheteur ne saisit pas de DA : il consulte les DA et fait les TCP et les BC (onglet Achats)
+    onglets = {} if role == "Acheteur" else {"Nouvelle DA": lambda: onglet_nouvelle(user),
+                                             "Mes DA": lambda: onglet_mes_da(user)}
     if role in ROLES_ACHATS:
         onglets["Achats"] = lambda: achats.onglet_achats(ctx)
     if role in ROLES_VALID_BC:
