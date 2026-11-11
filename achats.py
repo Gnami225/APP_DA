@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from logic import (as_text, fmt_date, fmt_montant, maintenant, montant_ligne, next_numero_tcp, nouvel_id,
-                   numero_bc, to_date, to_num, totaux)
+                   numero_bc, to_date, to_num, totaux, tva_ligne)
 from pdf import build_bc_pdf, build_tcp_pdf
 from schema import COLISAGES, CONDITIONS_DEFAUT, PARAMETRES_DEFAUT, STATUTS_BC, TABLES
 
@@ -570,9 +570,7 @@ def _vue_bc(ctx):
     cond = c1.selectbox("Conditions de règlement", conds, index=conds.index(cond_def) if cond_def else None,
                         accept_new_options=True, key=f"bc-cond-{k}", placeholder="Choisir ou saisir")
     magasin = c2.text_input("Magasin", key=f"bc-mag-{k}")
-    taux = to_num(p.get("Taux TVA (%)"))
-    tva_on = st.checkbox(f"Appliquer la TVA ({fmt_montant(taux, 1).rstrip('0').rstrip(',')} %)", value=True,
-                         key=f"bc-tva-{k}")
+    taux = to_num(p.get("Taux TVA (%)"))  # taux proposé par défaut sur chaque ligne, modifiable article par article
     obs = st.text_input("Observations", key=f"bc-obs-{k}")
 
     # ---- lignes de la DA
@@ -583,7 +581,7 @@ def _vue_bc(ctx):
         "Code parc": lignes["Code_Parc"].map(as_text).values,
         "Unité": lignes["Colisage"].map(as_text).values, "Reste DA": lignes["Reste à commander"].values,
         "Quantité": lignes["Reste à commander"].values,
-        "Prix unitaire HT": [prix_tcp.get(i) for i in lignes["_id"]], "Remise %": 0.0})
+        "Prix unitaire HT": [prix_tcp.get(i) for i in lignes["_id"]], "Remise %": 0.0, "TVA %": taux})
     if t:  # seules les lignes attribuées à ce fournisseur dans le TCP sont cochées
         grille["Inclure"] = grille["ID"].map(lambda i: i in prix_tcp)
     ed = st.data_editor(
@@ -595,7 +593,11 @@ def _vue_bc(ctx):
                        "Reste DA": st.column_config.NumberColumn(format="%.2f"),
                        "Quantité": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
                        "Prix unitaire HT": st.column_config.NumberColumn("P.U. HT (FCFA)", min_value=0.0, format="%.0f"),
-                       "Remise %": st.column_config.NumberColumn(min_value=0.0, max_value=100.0, format="%.1f")})
+                       "Remise %": st.column_config.NumberColumn(min_value=0.0, max_value=100.0, format="%.1f"),
+                       "TVA %": st.column_config.NumberColumn("TVA %", min_value=0.0, max_value=100.0, step=0.5,
+                                                              format="%.1f", help="Taux de TVA de l'article (0 si exonéré)")})
+    st.caption(f"TVA proposée à {fmt_montant(taux, 1).rstrip('0').rstrip(',')} % sur chaque ligne : modifiez-la "
+               "article par article dans la colonne « TVA % » (0 pour un article exonéré).")
 
     # ---- articles hors DA
     extra_key = f"bc_extra_{k}"
@@ -603,7 +605,8 @@ def _vue_bc(ctx):
     with st.expander(f"Ajouter un article hors DA ({len(st.session_state[extra_key])})"):
         des, ref, code, col_def, cles = ctx.picker(f"bcx-{k}")
         with st.form(f"bcx-form-{k}-{des}-{ref}", clear_on_submit=True):
-            a1, a2, a3, a4, a5 = st.columns(5)
+            a1, a2, a3, a4, a5, a6 = st.columns(6)
+            tva_x = a6.number_input("TVA %", min_value=0.0, max_value=100.0, value=float(taux), step=0.5)
             parc_x = a5.text_input("Code parc", placeholder="Facultatif")
             un = a1.selectbox("Unité", COLISAGES, index=COLISAGES.index(col_def) if col_def in COLISAGES else 0)
             q = a2.number_input("Quantité", min_value=0.0, value=1.0, step=1.0)
@@ -614,7 +617,7 @@ def _vue_bc(ctx):
                     st.session_state[extra_key].append({"ID": "", "Code Article": code or "", "Désignation": des,
                                                         "Référence": ref, "Code parc": parc_x.strip().upper(),
                                                         "Unité": un, "Quantité": q,
-                                                        "Prix unitaire HT": pu, "Remise %": rem})
+                                                        "Prix unitaire HT": pu, "Remise %": rem, "TVA %": tva_x})
                     for c in cles:
                         st.session_state.pop(c, None)
                     st.rerun()
@@ -630,7 +633,7 @@ def _vue_bc(ctx):
 
     sel = ed.loc[ed["Inclure"].astype(bool) & (ed["Quantité"].map(to_num) > 0)].to_dict("records")
     tout = sel + st.session_state[extra_key]
-    tot = totaux(tout, taux, tva_on)
+    tot = totaux(tout, taux)
     m1, m2, m3 = st.columns(3)
     m1.metric("Total HT", f"{fmt_montant(tot['Total HT'])} F")
     m2.metric("TVA", f"{fmt_montant(tot['Montant TVA'])} F")
@@ -658,10 +661,16 @@ def _vue_bc(ctx):
         entete = {"da": da, "four": as_text(four).upper(), "date": date_bc, "cond": as_text(cond),
                   "parc": ", ".join(dict.fromkeys(as_text(x.get("Code parc")) for x in tout if as_text(x.get("Code parc")))),
                   "magasin": magasin.strip(), "obs": obs.strip(),
-                  "taux": taux if tva_on else 0, "tot": tot, "id_tcp": id_tcp, "tcp": t}
+                  "taux": _taux_entete(tout, taux), "tot": tot, "id_tcp": id_tcp, "tcp": t}
         _enregistre_bc(ctx, entete, tout)
         st.session_state.pop(extra_key, None)
         st.rerun()
+
+
+def _taux_entete(lignes: list[dict], defaut: float):
+    """Taux affiché en en-tête du BC : le taux commun, ou « Mixte » si les articles ont des taux différents."""
+    taux = {to_num(l.get("TVA %", defaut)) for l in lignes}
+    return (taux.pop() if len(taux) == 1 else "Mixte") if taux else defaut
 
 
 def _enregistre_bc(ctx, e: dict, lignes: list[dict]):
@@ -687,6 +696,7 @@ def _enregistre_bc(ctx, e: dict, lignes: list[dict]):
                          "Désignation": as_text(l["Désignation"]), "Référence": as_text(l.get("Référence")),
                          "Code_Parc": as_text(l.get("Code parc")).upper(), "Unité": as_text(l.get("Unité")), "Quantité": to_num(l["Quantité"]),
                          "Prix unitaire HT": to_num(l["Prix unitaire HT"]), "Remise %": to_num(l.get("Remise %")),
+                         "TVA %": to_num(l.get("TVA %")), "Montant TVA": round(tva_ligne(l), 2),
                          "Montant HT": montant_ligne(l["Quantité"], l["Prix unitaire HT"], l.get("Remise %")),
                          "Fournisseur": e["four"], "Date BC": d, "Chantier": as_text(da["Chantier"]),
                          "N° DA": as_text(da["N° DA"])})
@@ -760,7 +770,7 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
     st.caption(f"{fmt_date(b['Date BC'])} · {as_text(b['Condition règlement'])} · émis par {as_text(b['Acheteur'])}"
                + (f" · TCP {as_text(b['N° TCP'])}" if as_text(b.get("N° TCP")) else ""))
     v = l[["Désignation", "Référence", "Code_Parc", "Unité", "Quantité", "Prix unitaire HT", "Remise %",
-           "Montant HT"]].rename(columns={"Code_Parc": "Code parc"}).copy()
+           "Montant HT", "TVA %"]].rename(columns={"Code_Parc": "Code parc"}).copy()
     v["Prix unitaire HT"] = v["Prix unitaire HT"].map(fmt_montant)
     v["Montant HT"] = v["Montant HT"].map(fmt_montant)
     st.dataframe(v, hide_index=True, width="stretch")
