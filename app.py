@@ -295,7 +295,8 @@ def detail_da(da: dict, key: str):
     lg = pd.DataFrame(lignes_de(da["ID_DA"]))
     if len(lg):
         lg = lg.sort_values("N° Ligne")[["N° Ligne", "Désignation", "Référence", "Code_Parc",
-                                         "Colisage", "Quantité", "Usage", "Statut ligne", "N° BC"]]
+                                         "Colisage", "Quantité", "Usage", "Statut ligne", "N° BC",
+                                         "Qté livrée", "Date livraison"]]
         st.dataframe(lg, hide_index=True, width="stretch")
     if as_text(da.get("Motif rejet")):
         st.warning(f"Motif du rejet : {as_text(da['Motif rejet'])}")
@@ -955,7 +956,7 @@ def _analyses_da():
     with pd.ExcelWriter(out, engine="openpyxl") as xw:
         flat.to_excel(xw, sheet_name="Lignes_DA", index=False)
         da.drop(columns=["_date", "_val", "Mois"]).to_excel(xw, sheet_name="DA", index=False)
-        for t in ("BC", "BC_LIGNES", "TCP", "TCP_OFFRES"):
+        for t in ("BC", "BC_LIGNES", "LIVRAISONS", "TCP", "TCP_OFFRES"):
             load(t).to_excel(xw, sheet_name=t, index=False)
     st.download_button("Exporter la base pour analyse (Excel)", out.getvalue(),
                        file_name=f"Export_DA_{date.today():%Y%m%d}.xlsx",
