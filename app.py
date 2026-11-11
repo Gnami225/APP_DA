@@ -17,14 +17,17 @@ import streamlit as st
 from acces import POSTES, Garde, creer_jeton, ligne_txt, lire_jeton, normalise, nouveau_code, trouve_poste
 from logic import as_text, build_da, decide, fmt_date, is_true, send_email, to_date
 from pdf import build_pdf, find_logo
-from schema import ANCIENS_STATUTS, COLISAGES, PRIORITES, ROLES_ADMIN, STATUTS, STATUTS_LIGNE
+import achats
+from schema import (ANCIENS_STATUTS, COLISAGES, PRIORITES, ROLES, ROLES_ACHATS, ROLES_ADMIN, ROLES_VALID_BC,
+                    STATUTS, STATUTS_LIGNE)
 from storage import ExcelStore, GoogleSheetStore
 
 APP_DIR = Path(__file__).resolve().parent
 LOGO = find_logo()
 _u = st.session_state.get("user") or {}
+LARGE = {"Admin", "Acheteur", "Direction"}  # rôles qui travaillent sur des tableaux : page large
 st.set_page_config(page_title="DA Chantier PWC", page_icon=str(LOGO) if LOGO else "📋",
-                   layout="wide" if _u.get("Rôle") == "Admin" else "centered")
+                   layout="wide" if _u.get("Rôle") in LARGE else "centered")
 ORANGE = "#F29200"
 st.markdown(f"""<style>
 div.block-container{{padding-top:3.2rem;padding-bottom:3rem}}
@@ -84,11 +87,17 @@ def _service_account():
     return dict(sa) if sa else None
 
 
+@st.cache_resource(show_spinner="Connexion à la base…")
+def _store_google(sheet_id: str):
+    """Connexion ouverte une seule fois par serveur (évite 3 appels Google à chaque enregistrement)."""
+    return GoogleSheetStore(_service_account(), sheet_id)
+
+
 def get_store():
     sa, sheet_id = _service_account(), _secret("SHEET_ID")
     if sa and sheet_id:
         try:
-            return GoogleSheetStore(sa, sheet_id)
+            return _store_google(sheet_id)
         except Exception as exc:
             code = getattr(exc, "code", "")
             aide = {403: "accès refusé : partagez le Google Sheet avec l'adresse du compte de service (Éditeur) "
@@ -116,11 +125,13 @@ def _services_pwc() -> bool:
     manquants = [{"Code Service": code, "Libellé": nom} for nom, code in POSTES.items() if code not in presents]
     if manquants:
         store.append("SERVICES", manquants)
+    achats.init_parametres(store)
     return True
 
 
-@st.cache_data(ttl=45, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def _load_all() -> dict:
+    """Toute la base en un appel Google, gardée 3 min ; vidée après chaque enregistrement."""
     _services_pwc()
     return get_store().read_all()  # un seul appel Google pour tous les onglets
 
@@ -192,7 +203,7 @@ def _secret_session() -> str:
 
 def _user_dict(nom: str) -> dict | None:
     if nom == ADMIN_SECOURS:
-        return {"Nom": "Administrateur", "Rôle": "Admin", "Email": "", "Chantier": "", "Service": ""}
+        return {"Nom": "Administrateur", "Rôle": "Admin", "Email": "", "Chantier": "", "Service": "", "Poste": ""}
     users = load("UTILISATEURS")
     r = users.loc[users["Nom"].map(as_text) == nom]
     if not len(r):
@@ -200,7 +211,9 @@ def _user_dict(nom: str) -> dict | None:
     r = r.iloc[0]
     if not (as_text(r["Actif"]) == "" or is_true(r["Actif"])):
         return None
-    return {k: as_text(r[k]) for k in ["Nom", "Rôle", "Email", "Chantier", "Service"]}
+    u = {k: as_text(r[k]) for k in ["Nom", "Rôle", "Email", "Chantier", "Service", "Poste"]}
+    u["Rôle"] = u["Rôle"] if u["Rôle"] in ROLES else "Demandeur"
+    return u
 
 
 def _code_actuel(nom: str) -> str | None:
@@ -282,7 +295,7 @@ def detail_da(da: dict, key: str):
     lg = pd.DataFrame(lignes_de(da["ID_DA"]))
     if len(lg):
         lg = lg.sort_values("N° Ligne")[["N° Ligne", "Désignation", "Référence", "Code_Parc",
-                                         "Colisage", "Quantité", "Usage"]]
+                                         "Colisage", "Quantité", "Usage", "Statut ligne", "N° BC"]]
         st.dataframe(lg, hide_index=True, width="stretch")
     if as_text(da.get("Motif rejet")):
         st.warning(f"Motif du rejet : {as_text(da['Motif rejet'])}")
@@ -351,6 +364,66 @@ def _choisir(cle: str, valeur: str):
     st.session_state[cle] = valeur
 
 
+def choisir_article(prefix: str):
+    """Désignation puis référence (liste filtrée) : choisir dans le catalogue ou saisir librement.
+    Retourne (désignation, référence, code article, colisage par défaut, clés des widgets à vider)."""
+    cat = catalogue()
+    # catalogue : désignation -> {référence -> code article}
+    refs_de = {}
+    for c, x in cat.items():
+        refs_de.setdefault(as_text(x["Désignation"]), {}).setdefault(as_text(x.get("Référence")), c)
+    desigs = sorted(refs_de)  # uniquement l'onglet ARTICLES de la base
+
+    # 1) Désignation : choisir dans la liste OU saisir librement
+    des = st.selectbox("Désignation", desigs, index=None, accept_new_options=True, key=f"{prefix}-des",
+                       placeholder="Choisir dans la liste ou taper librement")
+    if des:
+        des = " ".join(as_text(des).upper().split())
+    connue = bool(des) and des in refs_de
+    if des and not connue:  # texte libre : proposer les désignations standard les plus proches
+        props = articles_proches(des, desigs)
+        if props:
+            st.info("Désignations de la liste standard proches de votre saisie — cliquez pour la reprendre :")
+            for i, p in enumerate(props):
+                st.button(p, key=f"{prefix}-prop-{i}-{p}", on_click=_choisir, args=(f"{prefix}-des", p), width="stretch")
+            st.caption("Sinon, continuez : votre désignation sera enregistrée telle quelle.")
+
+    # 2) Référence : liste filtrée sur la désignation choisie, ou saisie libre
+    refs_dispo = refs_de.get(des, {}) if connue else {}
+    opts = sorted(r for r in refs_dispo if r)
+    cle_ref = f"{prefix}-ref-{des or ''}"
+    ref = st.selectbox("Référence", opts, index=None, accept_new_options=True, key=cle_ref, disabled=not des,
+                       placeholder=(f"{len(opts)} référence(s) pour cette désignation : choisir ou taper"
+                                    if opts else "Taper la référence (facultatif)"))
+    ref = " ".join(as_text(ref).upper().split()) if ref else ""
+    if ref and opts and ref not in refs_dispo:
+        proches = difflib.get_close_matches(ref, opts, n=4, cutoff=0.5)
+        if proches:
+            st.caption("Références proches dans la liste :")
+            cols = st.columns(len(proches))
+            for i, p in enumerate(proches):
+                cols[i].button(p, key=f"{prefix}-pref-{i}-{p}", on_click=_choisir, args=(cle_ref, p), width="stretch")
+
+    code = refs_dispo.get(ref) if connue else None
+    if connue and not code and not ref and "" in refs_dispo:
+        code = refs_dispo[""]
+    a = cat.get(code, {}) if code else {}
+    col_def = as_text(a.get("Colisage"))
+    if not col_def and connue:  # même colisage pour toutes les références de la désignation
+        cols_des = {as_text(cat[c].get("Colisage")) for c in refs_dispo.values()} - {""}
+        col_def = cols_des.pop() if len(cols_des) == 1 else ""
+    if des:
+        st.caption(f"✓ Article du catalogue {code}" if code else "Article hors catalogue (sans code)")
+
+    return des, ref, code, col_def, [f"{prefix}-des", cle_ref]
+
+
+def catalogue() -> dict:
+    art = load("ARTICLES")
+    art = art.loc[art["Code Article"].map(as_text) != ""]
+    return {as_text(a["Code Article"]): a for _, a in art.iterrows()}
+
+
 def onglet_nouvelle(user: dict):
     if "lignes" not in st.session_state:
         st.session_state.lignes = []
@@ -395,57 +468,9 @@ def onglet_nouvelle(user: dict):
     observations = st.text_area("Observations", height=68)
 
     st.markdown("##### Articles")
-    art = load("ARTICLES")
-    art = art.loc[art["Code Article"].map(as_text) != ""]
-    cat = {as_text(a["Code Article"]): a for _, a in art.iterrows()}
     hist = load("HISTORIQUE_ARTICLES")
     parcs = sorted((set(load("PARC")["Code_Parc"].map(as_text)) | set(hist["Code_Parc"].map(as_text))) - {""})
-    # catalogue : désignation -> {référence -> code article}
-    refs_de = {}
-    for c, x in cat.items():
-        refs_de.setdefault(as_text(x["Désignation"]), {}).setdefault(as_text(x.get("Référence")), c)
-    desigs = sorted(refs_de)  # uniquement l'onglet ARTICLES de la base
-
-    # 1) Désignation : choisir dans la liste OU saisir librement
-    des = st.selectbox("Désignation", desigs, index=None, accept_new_options=True, key="art-des",
-                       placeholder="Choisir dans la liste ou taper librement")
-    if des:
-        des = " ".join(as_text(des).upper().split())
-    connue = bool(des) and des in refs_de
-    if des and not connue:  # texte libre : proposer les désignations standard les plus proches
-        props = articles_proches(des, desigs)
-        if props:
-            st.info("Désignations de la liste standard proches de votre saisie — cliquez pour la reprendre :")
-            for i, p in enumerate(props):
-                st.button(p, key=f"prop-{i}-{p}", on_click=_choisir, args=("art-des", p), width="stretch")
-            st.caption("Sinon, continuez : votre désignation sera enregistrée telle quelle.")
-
-    # 2) Référence : liste filtrée sur la désignation choisie, ou saisie libre
-    refs_dispo = refs_de.get(des, {}) if connue else {}
-    opts = sorted(r for r in refs_dispo if r)
-    cle_ref = f"art-ref-{des or ''}"
-    ref = st.selectbox("Référence", opts, index=None, accept_new_options=True, key=cle_ref, disabled=not des,
-                       placeholder=(f"{len(opts)} référence(s) pour cette désignation : choisir ou taper"
-                                    if opts else "Taper la référence (facultatif)"))
-    ref = " ".join(as_text(ref).upper().split()) if ref else ""
-    if ref and opts and ref not in refs_dispo:
-        proches = difflib.get_close_matches(ref, opts, n=4, cutoff=0.5)
-        if proches:
-            st.caption("Références proches dans la liste :")
-            cols = st.columns(len(proches))
-            for i, p in enumerate(proches):
-                cols[i].button(p, key=f"pref-{i}-{p}", on_click=_choisir, args=(cle_ref, p), width="stretch")
-
-    code = refs_dispo.get(ref) if connue else None
-    if connue and not code and not ref and "" in refs_dispo:
-        code = refs_dispo[""]
-    a = cat.get(code, {}) if code else {}
-    col_def = as_text(a.get("Colisage"))
-    if not col_def and connue:  # même colisage pour toutes les références de la désignation
-        cols_des = {as_text(cat[c].get("Colisage")) for c in refs_dispo.values()} - {""}
-        col_def = cols_des.pop() if len(cols_des) == 1 else ""
-    if des:
-        st.caption(f"✓ Article du catalogue {code}" if code else "Article hors catalogue (sans code)")
+    des, ref, code, col_def, (_, cle_ref) = choisir_article("art")
 
     with st.form(f"ajout-{des or ''}-{ref}", clear_on_submit=True):
         a1, a2 = st.columns(2)
@@ -704,11 +729,15 @@ def onglet_admin_da(user: dict):
 
 
 def onglet_admin(user: dict):
-    t1, t2 = st.tabs(["Demandes d'achat", "Utilisateurs & accès"])
+    t1, t2, t3, t4 = st.tabs(["Demandes d'achat", "Utilisateurs & accès", "Paramètres", "Archivage"])
     with t1:
         onglet_admin_da(user)
     with t2:
         onglet_acces(user)
+    with t3:
+        achats.onglet_parametres(contexte(user))
+    with t4:
+        achats.onglet_archivage(contexte(user))
 
 
 def _creer_acces(personnes: list[dict]) -> tuple[list[str], list[str]]:
@@ -731,7 +760,10 @@ def _creer_acces(personnes: list[dict]) -> tuple[list[str], list[str]]:
         code = nouveau_code(p["Poste"].strip(), codes)
         codes.add(code)
         noms.add(nom.lower())
-        rows.append({"Email": p.get("Email", ""), "Nom": nom, "Rôle": p.get("Rôle") or "Demandeur",
+        role = p.get("Rôle") if p.get("Rôle") in ROLES else (
+            "Acheteur" if poste == "Achats" else
+            "Direction" if poste in ("Direction générale", "Direction d'exploitation") else "Demandeur")
+        rows.append({"Email": p.get("Email", ""), "Nom": nom, "Rôle": role,
                      "Chantier": p.get("Chantier", ""), "Service": p.get("Service", ""),
                      "Actif": "TRUE", "PIN": code, "Poste": p["Poste"].strip()})
         lignes.append(ligne_txt(nom, p["Poste"].strip(), code))
@@ -769,7 +801,9 @@ def onglet_acces(user: dict):
         poste = c2.selectbox("Poste", postes, index=None, placeholder="Choisir")
         c1, c2 = st.columns(2)
         chantier = c1.selectbox("Chantier", ch_codes, format_func=lambda c: c or "— aucun —")
-        role = c2.selectbox("Rôle", ["Demandeur", "Admin"])
+        role = c2.selectbox("Rôle", ["Selon le poste"] + ROLES,
+                            help="Selon le poste : Achats → Acheteur ; Direction générale / d'exploitation → "
+                                 "Direction ; autres → Demandeur")
         email = st.text_input("Email (facultatif, pour les notifications)")
         if st.form_submit_button("Créer l'accès", type="primary"):
             lignes, erreurs = _creer_acces([{"Nom": nom, "Poste": poste or "", "Chantier": chantier,
@@ -816,7 +850,8 @@ def onglet_acces(user: dict):
         disabled=["Nom", "PIN", "Service"],
         column_config={
             "Poste": st.column_config.SelectboxColumn(options=postes),
-            "Rôle": st.column_config.SelectboxColumn(options=["Demandeur", "Admin"], required=True),
+            "Rôle": st.column_config.SelectboxColumn(options=ROLES, required=True,
+                                                     help="Acheteur : onglet Achats · Direction : valide les BC"),
             "Chantier": st.column_config.SelectboxColumn(options=ch_codes),
             "Service": st.column_config.TextColumn(help="Suit automatiquement le poste"),
             "Actif": st.column_config.CheckboxColumn(help="Décocher pour couper l'accès"),
@@ -863,7 +898,15 @@ def onglet_acces(user: dict):
         st.caption("L'ancien code ne fonctionne plus dès que le nouveau est généré.")
 
 
-def onglet_analyses():
+def onglet_analyses(ctx=None):
+    t_da, t_ach = st.tabs(["Demandes d'achat", "Achats"])
+    with t_ach:
+        achats.analyses_achats(ctx)
+    with t_da:
+        _analyses_da()
+
+
+def _analyses_da():
     da, lg = load("DA"), load("HISTORIQUE_ARTICLES")
     if not len(da):
         st.info("Pas encore de données.")
@@ -912,40 +955,74 @@ def onglet_analyses():
     with pd.ExcelWriter(out, engine="openpyxl") as xw:
         flat.to_excel(xw, sheet_name="Lignes_DA", index=False)
         da.drop(columns=["_date", "_val", "Mois"]).to_excel(xw, sheet_name="DA", index=False)
+        for t in ("BC", "BC_LIGNES", "TCP", "TCP_OFFRES"):
+            load(t).to_excel(xw, sheet_name=t, index=False)
     st.download_button("Exporter la base pour analyse (Excel)", out.getvalue(),
                        file_name=f"Export_DA_{date.today():%Y%m%d}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 # --------------------------------------------------------------------------- main
+def contexte(user: dict):
+    from types import SimpleNamespace
+    return SimpleNamespace(load=load, refresh=refresh, get_store=get_store, refs=refs, picker=choisir_article,
+                           user=user)
+
+
+def bloquer_traduction():
+    """La traduction automatique du navigateur (Chrome « Traduire cette page ») modifie la page
+    et provoque l'erreur « removeChild … n'est pas un enfant de ce nœud ». On déclare la page
+    en français et non traduisible."""
+    js = """<script>
+    try {
+      const d = (window.parent && window.parent.document) || document, h = d.documentElement;
+      h.lang = "fr"; h.setAttribute("translate", "no"); h.classList.add("notranslate");
+      if (!d.querySelector('meta[name="google"]')) {
+        const m = d.createElement("meta"); m.name = "google"; m.content = "notranslate"; d.head.appendChild(m);
+      }
+    } catch (e) {}
+    </script>"""
+    try:
+        st.html(js, unsafe_allow_javascript=True)
+    except TypeError:  # Streamlit plus ancien
+        import streamlit.components.v1 as components
+        components.html(js, height=0)
+
+
 def main():
+    bloquer_traduction()
     restaurer_session()
-    if (st.session_state.get("user") or {}).get("Rôle") == "Admin" and _u.get("Rôle") != "Admin":
+    if (st.session_state.get("user") or {}).get("Rôle") in LARGE and _u.get("Rôle") not in LARGE:
         st.set_page_config(layout="wide")  # session restaurée après actualisation
     if "user" not in st.session_state:
         login()
     user = st.session_state.user
     admin = user["Rôle"] in ROLES_ADMIN
-    badge = '<span class="pwc-badge">ADMIN</span>' if admin else ""
-    h1, h2 = st.columns([5, 1], vertical_alignment="center")
+    badge = f'<span class="pwc-badge">{user["Rôle"].upper()}</span>' if user["Rôle"] != "Demandeur" else ""
+    h1, h0, h2 = st.columns([5, 1, 1], vertical_alignment="center")
     h1.markdown(f'<div class="pwc-bar"><div class="t">DA <span>Chantier</span> PWC</div>'
                 f'<div class="u">{user["Nom"]}{badge}</div></div>', unsafe_allow_html=True)
+    if h0.button("🔄", help="Actualiser les données (DA et BC saisis par les autres)"):
+        refresh()
+        st.rerun()
     if h2.button("Quitter"):
         st.session_state.clear()
         st.query_params.clear()
         st.rerun()
 
-    noms = ["Nouvelle DA", "Mes DA"] + (["Administration", "Analyses"] if admin else [])
-    tabs = st.tabs(noms)
-    with tabs[0]:
-        onglet_nouvelle(user)
-    with tabs[1]:
-        onglet_mes_da(user)
+    role = user["Rôle"]
+    ctx = contexte(user)
+    onglets = {"Nouvelle DA": lambda: onglet_nouvelle(user), "Mes DA": lambda: onglet_mes_da(user)}
+    if role in ROLES_ACHATS:
+        onglets["Achats"] = lambda: achats.onglet_achats(ctx)
+    if role in ROLES_VALID_BC:
+        onglets["Validation BC"] = lambda: achats.onglet_validation_bc(ctx)
     if admin:
-        with tabs[2]:
-            onglet_admin(user)
-        with tabs[3]:
-            onglet_analyses()
-
+        onglets["Administration"] = lambda: onglet_admin(user)
+    if role in ROLES_ADMIN | ROLES_VALID_BC:
+        onglets["Analyses"] = lambda: onglet_analyses(ctx)
+    for tab, fn in zip(st.tabs(list(onglets)), onglets.values()):
+        with tab:
+            fn()
 
 main()
