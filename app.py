@@ -6,6 +6,7 @@ Données : Google Sheet (si les secrets sont configurés) sinon fichier Excel lo
 from __future__ import annotations
 
 import difflib
+import hashlib
 import io
 import os
 from datetime import date
@@ -18,7 +19,7 @@ from acces import POSTES, Garde, creer_jeton, ligne_txt, lire_jeton, normalise, 
 from logic import as_text, build_da, decide, fmt_date, is_true, send_email, to_date
 from pdf import build_pdf, find_logo
 import achats
-from schema import (ANCIENS_STATUTS, COLISAGES, PRIORITES, ROLES, ROLES_ACHATS, ROLES_ADMIN, ROLES_VALID_BC,
+from schema import (TABLES, ANCIENS_STATUTS, COLISAGES, PRIORITES, ROLES, ROLES_ACHATS, ROLES_ADMIN, ROLES_VALID_BC,
                     STATUTS, STATUTS_LIGNE)
 from storage import ExcelStore, GoogleSheetStore
 
@@ -88,16 +89,21 @@ def _service_account():
 
 
 @st.cache_resource(show_spinner="Connexion à la base…")
-def _store_google(sheet_id: str):
-    """Connexion ouverte une seule fois par serveur (évite 3 appels Google à chaque enregistrement)."""
+def _store_google(sheet_id: str, version_schema: str):
+    """Connexion ouverte une seule fois par serveur (évite 3 appels Google à chaque enregistrement).
+    `version_schema` change dès qu'un onglet ou une colonne est ajouté dans schema.py : la connexion est
+    alors rouverte et les nouveaux onglets / colonnes sont créés dans le Google Sheet."""
     return GoogleSheetStore(_service_account(), sheet_id)
+
+
+VERSION_SCHEMA = hashlib.md5(repr(sorted(TABLES.items())).encode()).hexdigest()[:10]
 
 
 def get_store():
     sa, sheet_id = _service_account(), _secret("SHEET_ID")
     if sa and sheet_id:
         try:
-            return _store_google(sheet_id)
+            return _store_google(sheet_id, VERSION_SCHEMA)
         except Exception as exc:
             code = getattr(exc, "code", "")
             aide = {403: "accès refusé : partagez le Google Sheet avec l'adresse du compte de service (Éditeur) "
@@ -140,8 +146,10 @@ _COLONNES_REQUISES = {"UTILISATEURS": ["Email", "Nom", "Rôle", "Chantier", "Ser
 
 
 def load(table: str) -> pd.DataFrame:
-    df = _load_all()[table]
-    manquantes = [c for c in _COLONNES_REQUISES.get(table, []) if c not in df.columns]
+    df = _load_all().get(table)
+    if df is None:  # onglet pas encore créé dans la base : table vide
+        df = pd.DataFrame(columns=TABLES.get(table, []))
+    manquantes = [c for c in TABLES.get(table, []) + _COLONNES_REQUISES.get(table, []) if c not in df.columns]
     if manquantes:  # tolère un schema.py ou un Google Sheet en retard d'une version
         df = df.copy()
         for c in manquantes:
