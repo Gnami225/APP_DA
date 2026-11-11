@@ -17,8 +17,8 @@ from logic import (as_text, fmt_date, fmt_montant, maintenant, montant_ligne, ne
 from pdf import build_bc_pdf, build_tcp_pdf
 from schema import COLISAGES, CONDITIONS_DEFAUT, PARAMETRES_DEFAUT, STATUTS_BC, TABLES
 
-BC_ACTIFS = {"Émis", "Validé"}  # un BC annulé libère les quantités de la DA
-DA_OUVERTES = ["Émise", "Validée"]  # plus d'étape de validation : toute DA non rejetée part aux achats
+BC_ACTIFS = {"Émis", "Validé"}  # un BC rejeté ou annulé libère les quantités de la DA
+DA_OUVERTES = ["Validée"]  # seules les DA validées partent aux achats
 
 
 # =========================================================================== paramètres
@@ -84,7 +84,7 @@ def suivi_lignes(ctx) -> pd.DataFrame:
 
 
 def da_ouvertes(ctx) -> pd.DataFrame:
-    """DA (non rejetées) ayant encore des quantités à commander."""
+    """DA validées ayant encore des quantités à commander."""
     da = ctx.load("DA")
     da = da.loc[da["Statut"].map(as_text).isin(DA_OUVERTES).astype(bool)].copy()
     if not len(da):
@@ -101,13 +101,13 @@ def da_ouvertes(ctx) -> pd.DataFrame:
 def _choix_da(ctx, key: str, on_change=None) -> dict | None:
     da = da_ouvertes(ctx)
     if not len(da):
-        st.info("Aucune DA en attente de commande.")
+        st.info("Aucune DA validée en attente de commande.")
         return None
     r = ctx.refs()["chantiers"]
     lab = {row["_id"]: f"{as_text(row['N° DA'])} · {r.get(as_text(row['Chantier']), as_text(row['Chantier']))} · "
                        f"{as_text(row['Demandeur'])} · {row['À commander']}/{row['Lignes']} ligne(s) à commander"
            for _, row in da.iterrows()}
-    id_da = st.selectbox("Demande d'achat", list(lab), format_func=lab.get, index=None,
+    id_da = st.selectbox("Demande d'achat (DA validée)", list(lab), format_func=lab.get, index=None,
                          key=key, placeholder="Choisir la DA à commander", on_change=on_change)
     if not id_da:
         return None
@@ -181,9 +181,9 @@ def _vue_da(ctx):
         return "Partielle" if r["Cmd"] else "À commander"
     v["Achat"] = v.apply(etat, axis=1)
     k1, k2, k3 = st.columns(3)
-    k1.metric("DA à commander", int((v["Achat"] == "À commander").sum()))
+    k1.metric("DA validées à commander", int((v["Achat"] == "À commander").sum()))
     k2.metric("Partiellement commandées", int((v["Achat"] == "Partielle").sum()))
-    k3.metric("Entièrement commandées", int((v["Achat"] == "Commandée").sum()))
+    k3.metric("DA en attente de validation", int((v["Statut"] == "Émise").sum()))
     c1, c2 = st.columns(2)
     choix = c1.multiselect("Situation achat", ["À commander", "Partielle", "Commandée", "—"],
                            default=["À commander", "Partielle"], key="ach-da-f")
@@ -508,7 +508,7 @@ def _bc_suivant():
 def _vue_bc(ctx):
     if st.session_state.get("bc_ok"):
         ok = st.session_state["bc_ok"]
-        st.success(f"Bon de commande **{ok['numero']}** émis.")
+        st.success(f"Bon de commande **{ok['numero']}** émis — en attente de validation par la direction.")
         c1, c2 = st.columns(2)
         c1.download_button("Télécharger / imprimer le BC", ok["pdf"], file_name=f"{ok['numero']}.pdf",
                            mime="application/pdf", type="primary", key="bc-pdf-ok")
@@ -773,7 +773,7 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
     c1, c2 = st.columns(2)
     c1.download_button("Télécharger / imprimer le BC", pdf_bc(ctx, b, l.to_dict("records")), file_name=nom,
                        mime="application/pdf", type="primary", key=f"{key}-pdf")
-    if annuler and statut in ("Émis", "Validé", "Rejeté"):
+    if annuler and statut in ("Émis", "Rejeté"):
         if c2.button("Annuler ce BC (libère les quantités de la DA)", key=f"{key}-ann"):
             ctx.get_store().update("BC", "ID_BC", as_text(b["ID_BC"]), {"Statut": "Annulé"})
             maj_lignes_da(ctx, {as_text(x) for x in l["ID_Ligne_DA"] if as_text(x)})
@@ -947,7 +947,7 @@ _ARCHIVE = {"DA": "Date DA", "HISTORIQUE_ARTICLES": "DA_Date", "TCP": "Date TCP"
 def onglet_archivage(ctx):
     st.markdown("##### Archivage annuel")
     st.caption("Télécharge toutes les données d'une année dans un fichier Excel, puis les retire de la base "
-               "pour que l'app reste rapide. Les DA pas encore entièrement commandées sont conservées.")
+               "pour que l'app reste rapide. Les DA validées pas encore entièrement commandées sont conservées.")
     annees = set()
     for t, col in _ARCHIVE.items():
         annees |= {d.year for d in ctx.load(t)[col].map(to_date) if d}
@@ -993,7 +993,7 @@ def analyses_achats(ctx):
     if not len(bc):
         st.info("Pas encore de bon de commande.")
         return
-    val = bc.loc[bc["Statut"].map(as_text).isin(BC_ACTIFS).astype(bool)].copy()
+    val = bc.loc[bc["Statut"].map(as_text) == "Validé"].copy()
     val["HT"] = val["Total HT"].map(to_num)
     actifs = set(val["ID_BC"].map(as_text))
     blv = bl.loc[bl["ID_BC"].map(as_text).isin(actifs).astype(bool)].copy()
@@ -1001,10 +1001,10 @@ def analyses_achats(ctx):
     blv["PU"] = blv["Prix unitaire HT"].map(to_num)
     blv["Qté"] = blv["Quantité"].map(to_num)
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("BC émis", len(val))
-    k2.metric("Montant HT commandé", f"{fmt_montant(val['HT'].sum())} F")
-    k3.metric("BC annulés", int((bc["Statut"] == "Annulé").sum()))
-    k4.metric("DA à commander", len(da_ouvertes(ctx)))
+    k1.metric("BC validés", len(val))
+    k2.metric("Montant HT validé", f"{fmt_montant(val['HT'].sum())} F")
+    k3.metric("BC en attente", int((bc["Statut"] == "Émis").sum()))
+    k4.metric("DA validées à commander", len(da_ouvertes(ctx)))
 
     val["Mois"] = val["Date BC"].map(lambda v: (to_date(v) or date(1900, 1, 1)).strftime("%Y-%m"))
     c1, c2 = st.columns(2)
@@ -1017,7 +1017,7 @@ def analyses_achats(ctx):
         pv = val.pivot_table(index="Chantier", columns="Mois", values="HT", aggfunc="sum", fill_value=0)
         st.dataframe(pv.map(fmt_montant), width="stretch")
 
-    st.markdown("##### Prix par article (BC émis)")
+    st.markdown("##### Prix par article (BC validés)")
     if len(blv):
         pr = (blv.groupby(["Désignation", "Référence", "Unité"])
               .agg(Commandes=("ID_BC", "nunique"), Qté=("Qté", "sum"), Fournisseurs=("Fournisseur", "nunique"),
@@ -1038,12 +1038,12 @@ def analyses_achats(ctx):
 
     # délai DA validée -> BC
     da = ctx.load("DA")
-    dv = dict(zip(da["ID_DA"].map(as_text), da["Date DA"].map(to_date)))
+    dv = dict(zip(da["ID_DA"].map(as_text), da["Date validation"].map(to_date)))
     delais = [(to_date(r["Date BC"]) - dv[as_text(r["ID_DA"])]).days for _, r in val.iterrows()
               if dv.get(as_text(r["ID_DA"])) and to_date(r["Date BC"])]
     tc = tcp.loc[tcp["Statut"].map(as_text) != "Abandonné"]
     c1, c2, c3 = st.columns(3)
-    c1.metric("Délai moyen DA → BC", f"{sum(delais) / len(delais):.1f} j" if delais else "–")
+    c1.metric("Délai moyen DA validée → BC", f"{sum(delais) / len(delais):.1f} j" if delais else "–")
     c2.metric("BC issus d'un TCP", f"{(val['ID_TCP'].map(as_text) != '').mean():.0%}" if len(val) else "–")
     ecart = (tc["Montant retenu HT"].map(to_num) - tc["Montant moins-disant HT"].map(to_num)).sum() if len(tc) else 0
     c3.metric("Surcoût des choix vs meilleur prix par article (TCP)", f"{fmt_montant(ecart)} F",
