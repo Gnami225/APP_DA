@@ -213,17 +213,19 @@ def _vue_da(ctx):
 def _vue_tcp(ctx):
     if st.session_state.get("tcp_ok"):
         ok = st.session_state["tcp_ok"]
-        st.success(f"TCP **{ok['numero']}** enregistré.")
+        st.success(f"TCP **{ok['numero']}** enregistré — {len(ok['fours'])} fournisseur(s) retenu(s) : "
+                   f"{', '.join(ok['fours'])}.")
         c1, c2, c3 = st.columns(3)
         c1.download_button("Télécharger / imprimer le TCP", ok["pdf"], file_name=f"{ok['numero']}.pdf",
                            mime="application/pdf", type="primary", key="tcp-pdf-ok")
-        c2.button("Préparer le BC à partir de ce TCP", key="tcp-to-bc", on_click=_prepare_bc,
+        c2.button("Préparer les BC de ce TCP", key="tcp-to-bc", on_click=_prepare_bc,
                   args=(ok["id_da"], ok["id_tcp"]))
         if c3.button("Nouveau TCP", key="tcp-new"):
             del st.session_state["tcp_ok"]
             st.rerun()
         if st.session_state.get("bc_prepare"):
-            st.info("C'est prêt : ouvrez l'onglet « Bons de commande », la DA et le TCP y sont déjà sélectionnés.")
+            st.info("C'est prêt : ouvrez l'onglet « Bons de commande ». La DA et le TCP sont sélectionnés ; "
+                    "émettez un BC par fournisseur retenu.")
         return
     mode = st.radio("TCP", ["Nouveau TCP", "TCP enregistrés"], horizontal=True, label_visibility="collapsed",
                     key="tcp-mode")
@@ -236,31 +238,35 @@ def _vue_tcp(ctx):
         return
     sl = suivi_lignes(ctx)
     lignes = sl.loc[(sl["ID_DA"].map(as_text) == da["_id"]) & (sl["Reste à commander"] > 0)].sort_values("N° Ligne")
-    nf = st.radio("Nombre de fournisseurs consultés", [2, 3, 4], index=1, horizontal=True, key="tcp-nf")
+    nf = int(st.number_input("Nombre de fournisseurs consultés", min_value=1, max_value=12, value=3, step=1,
+                             key="tcp-nf"))
     conds, fours = conditions(ctx), fournisseurs(ctx)
     offres = []
-    cols = st.columns(nf)
-    for j in range(nf):
-        with cols[j]:
-            st.markdown(f"**Fournisseur {j + 1}**")
-            nom = st.selectbox("Nom", fours, index=None, accept_new_options=True, key=f"tcp-f{j}-{da['_id']}",
-                               placeholder="Choisir ou saisir")
-            delai = st.text_input("Délai de livraison", key=f"tcp-d{j}-{da['_id']}")
-            cond = st.selectbox("Conditions de règlement", conds, index=None, accept_new_options=True,
-                                key=f"tcp-c{j}-{da['_id']}", placeholder="Choisir ou saisir")
-            obs = st.text_input("Observation", key=f"tcp-o{j}-{da['_id']}")
-            offres.append({"Nom": as_text(nom).upper(), "Délai": delai.strip(), "Condition": as_text(cond),
-                           "Observation": obs.strip()})
+    par_ligne = min(nf, 4)
+    for debut in range(0, nf, par_ligne):
+        cols = st.columns(par_ligne)
+        for j in range(debut, min(debut + par_ligne, nf)):
+            with cols[j - debut]:
+                st.markdown(f"**Fournisseur {j + 1}**")
+                nom = st.selectbox("Nom", fours, index=None, accept_new_options=True, key=f"tcp-f{j}-{da['_id']}",
+                                   placeholder="Choisir ou saisir")
+                delai = st.text_input("Délai de livraison", key=f"tcp-d{j}-{da['_id']}")
+                cond = st.selectbox("Conditions de règlement", conds, index=None, accept_new_options=True,
+                                    key=f"tcp-c{j}-{da['_id']}", placeholder="Choisir ou saisir")
+                obs = st.text_input("Observation", key=f"tcp-o{j}-{da['_id']}")
+                offres.append({"Nom": as_text(nom).upper(), "Délai": delai.strip(), "Condition": as_text(cond),
+                               "Observation": obs.strip()})
     noms = [o["Nom"] for o in offres]
     if any(not n for n in noms):
-        st.caption("Renseignez le nom des fournisseurs pour saisir les prix.")
+        st.caption("Renseignez le nom de chaque fournisseur pour saisir les prix.")
         return
     if len(set(noms)) < len(noms):
         st.error("Un même fournisseur est saisi deux fois.")
         return
 
-    st.markdown("##### Prix unitaires HT proposés (FCFA)")
-    st.caption("Laissez vide si le fournisseur n'a pas chiffré l'article.")
+    # ---- 1) prix proposés, article par article
+    st.markdown("##### 1. Prix unitaires HT proposés (FCFA)")
+    st.caption("Laissez vide si le fournisseur n'a pas chiffré l'article. Décochez ✓ pour sortir un article du TCP.")
     grille = pd.DataFrame({
         "Inclure": True, "ID": lignes["_id"].values, "Désignation": lignes["Désignation"].map(as_text).values,
         "Référence": lignes["Référence"].map(as_text).values, "Unité": lignes["Colisage"].map(as_text).values,
@@ -274,82 +280,118 @@ def _vue_tcp(ctx):
     ed = st.data_editor(grille, hide_index=True, width="stretch", column_config=cfg,
                         disabled=["Désignation", "Référence", "Unité"],
                         key=f"tcp-grille-{da['_id']}-{'|'.join(noms)}")
-    ed = ed.loc[ed["Inclure"].astype(bool) & (ed["Quantité"].map(to_num) > 0)]
+    ed = ed.loc[ed["Inclure"].astype(bool) & (ed["Quantité"].map(to_num) > 0)].reset_index(drop=True)
     if not len(ed):
-        st.warning("Aucune ligne incluse.")
+        st.warning("Aucun article inclus.")
         return
-
-    # ---- comparaison
-    synth = []
-    for j, n in enumerate(noms):
-        pus = ed[f"PU{j}"].map(to_num)
-        total = sum(montant_ligne(q, p) for q, p in zip(ed["Quantité"], pus))
-        manquantes = int((pus <= 0).sum())
-        synth.append({"Fournisseur": n, "Total HT": total, "Lignes non chiffrées": manquantes})
-    sy = pd.DataFrame(synth)
-    complets = sy.loc[(sy["Lignes non chiffrées"] == 0) & (sy["Total HT"] > 0)]
-    base = complets if len(complets) else sy.loc[sy["Total HT"] > 0]
-    if not len(base):
+    pu = pd.DataFrame({n: ed[f"PU{j}"].map(to_num) for j, n in enumerate(noms)})
+    if not (pu > 0).any().any():
         st.caption("Saisissez les prix pour voir la comparaison.")
         return
-    moins = base.sort_values("Total HT").iloc[0]
-    sy["Écart vs moins-disant"] = sy["Total HT"] - moins["Total HT"]
-    st.dataframe(sy.assign(**{"Total HT": sy["Total HT"].map(fmt_montant),
-                              "Écart vs moins-disant": sy["Écart vs moins-disant"].map(fmt_montant)}),
+
+    # ---- 2) meilleur prix et choix par article
+    def meilleur(i):
+        r = pu.iloc[i]
+        r = r[r > 0]
+        return r.idxmin() if len(r) else ""
+    best = [meilleur(i) for i in range(len(ed))]
+    st.markdown("##### 2. Fournisseur retenu par article")
+    st.caption("Par défaut : le moins cher de chaque article. Changez si besoin (délai, qualité, disponibilité…). "
+               "Un BC sera émis par fournisseur retenu.")
+    choix = pd.DataFrame({
+        "Désignation": ed["Désignation"], "Référence": ed["Référence"], "Quantité": ed["Quantité"],
+        "Meilleur prix": [f"{b} ({fmt_montant(pu.at[i, b])})" if b else "non chiffré" for i, b in enumerate(best)],
+        "Retenu": [b or None for b in best]})
+    empreinte = abs(hash(tuple(pu.round(2).to_numpy().ravel().tolist()) + tuple(ed["ID"]))) % 10 ** 8
+    ch = st.data_editor(choix, hide_index=True, width="stretch", disabled=["Désignation", "Référence", "Quantité",
+                                                                          "Meilleur prix"],
+                        column_config={"Retenu": st.column_config.SelectboxColumn("Fournisseur retenu", options=noms)},
+                        key=f"tcp-choix-{da['_id']}-{empreinte}")
+    retenus = [as_text(x) for x in ch["Retenu"]]
+    sans_prix = [ed.at[i, "Désignation"] for i, n in enumerate(retenus) if n and pu.at[i, n] <= 0]
+    if sans_prix:
+        st.error("Le fournisseur retenu n'a pas chiffré : " + ", ".join(sans_prix))
+        return
+
+    # ---- 3) synthèse
+    q = ed["Quantité"].map(to_num)
+    synth = []
+    for n in noms:
+        chiffre = pu[n] > 0
+        synth.append({"Fournisseur": n, "Articles chiffrés": f"{int(chiffre.sum())}/{len(ed)}",
+                      "Total offre HT": (q * pu[n]).sum(),
+                      "Articles retenus": sum(1 for r in retenus if r == n),
+                      "Montant retenu HT": sum(q[i] * pu.at[i, n] for i, r in enumerate(retenus) if r == n)})
+    sy = pd.DataFrame(synth)
+    total_best = sum(q[i] * pu.at[i, b] for i, b in enumerate(best) if b)
+    total_ret = sy["Montant retenu HT"].sum()
+    complets = sy.loc[sy["Articles chiffrés"] == f"{len(ed)}/{len(ed)}"]
+    st.markdown("##### 3. Synthèse")
+    st.dataframe(sy.assign(**{c: sy[c].map(fmt_montant) for c in ("Total offre HT", "Montant retenu HT")}),
                  hide_index=True, width="stretch")
-    st.success(f"Moins-disant{'' if len(complets) else ' (aucune offre complète)'} : "
-               f"**{moins['Fournisseur']}** — {fmt_montant(moins['Total HT'])} FCFA HT")
-    c1, c2 = st.columns(2)
-    retenu = c1.selectbox("Fournisseur retenu", noms, index=noms.index(moins["Fournisseur"]), key="tcp-ret")
-    motif = c2.text_input("Motif du choix (facultatif)", key="tcp-motif",
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total retenu HT", f"{fmt_montant(total_ret)} F")
+    m2.metric("Meilleur prix par article", f"{fmt_montant(total_best)} F",
+              help="Somme des prix les plus bas de chaque article")
+    if len(complets):
+        mono = complets.sort_values("Total offre HT").iloc[0]
+        m3.metric("Meilleure offre d'un seul fournisseur", f"{fmt_montant(mono['Total offre HT'])} F",
+                  help=f"{mono['Fournisseur']} (offre complète)")
+    non_retenus = [ed.at[i, "Désignation"] for i, r in enumerate(retenus) if not r]
+    if non_retenus:
+        st.warning("Sans fournisseur retenu (non commandés via ce TCP) : " + ", ".join(non_retenus))
+    motif = st.text_input("Motif des choix (facultatif)", key="tcp-motif",
                           placeholder="Ex. : délai, qualité, disponibilité…")
     obs = st.text_input("Observations du TCP (facultatif)", key="tcp-obs")
-    if st.button("Enregistrer le TCP", type="primary", key="tcp-save"):
-        _enregistre_tcp(ctx, da, offres, ed, sy, moins, retenu, motif, obs)
+    if st.button("Enregistrer le TCP", type="primary", key="tcp-save", disabled=not any(retenus)):
+        _enregistre_tcp(ctx, da, offres, ed, pu, retenus, best, sy, motif, obs)
 
 
-def _enregistre_tcp(ctx, da, offres, ed, sy, moins, retenu, motif, obs):
+def _enregistre_tcp(ctx, da, offres, ed, pu, retenus, best, sy, motif, obs):
     store = ctx.get_store()
     p = params(ctx)
     auj = date.today()
     numero = next_numero_tcp(store.read("TCP"), p.get("Préfixe TCP") or "TCP-", auj.year)
     id_tcp = nouvel_id()
     noms = [o["Nom"] for o in offres]
-    for o, s in zip(offres, sy.to_dict("records")):
-        if s["Lignes non chiffrées"]:
-            o["Observation"] = " ; ".join(x for x in [o["Observation"], f"offre incomplète ({s['Lignes non chiffrées']} "
-                                                       "ligne(s) non chiffrée(s))"] if x)
-    tot_ret = float(sy.loc[sy["Fournisseur"] == retenu, "Total HT"].iloc[0])
+    n_l = len(ed)
+    for o in offres:
+        nb = int((pu[o["Nom"]] > 0).sum())
+        if nb < n_l:
+            o["Observation"] = " ; ".join(x for x in [o["Observation"], f"{n_l - nb} article(s) non chiffré(s)"] if x)
+    q = ed["Quantité"].map(to_num)
+    total_ret = sum(q[i] * pu.at[i, r] for i, r in enumerate(retenus) if r)
+    total_best = sum(q[i] * pu.at[i, b] for i, b in enumerate(best) if b)
+    fours_ret = list(dict.fromkeys(r for r in retenus if r))
     row = {"ID_TCP": id_tcp, "N° TCP": numero, "Date TCP": auj.isoformat(), "ID_DA": da["_id"],
            "N° DA": as_text(da["N° DA"]), "Chantier": as_text(da["Chantier"]),
-           "Fournisseurs consultés": " | ".join(noms), "Fournisseur retenu": retenu,
-           "Montant retenu HT": round(tot_ret), "Moins-disant": moins["Fournisseur"],
-           "Montant moins-disant HT": round(float(moins["Total HT"])), "Motif choix": motif.strip(),
+           "Fournisseurs consultés": " | ".join(noms), "Fournisseur retenu": " | ".join(fours_ret),
+           "Montant retenu HT": round(total_ret), "Moins-disant": "Meilleur prix par article",
+           "Montant moins-disant HT": round(total_best), "Motif choix": motif.strip(),
            "Conditions offres": json.dumps(offres, ensure_ascii=False), "Acheteur": ctx.user["Nom"],
            "Statut": "Établi", "N° BC": "", "Observations": obs.strip(), "Créé le": maintenant()}
-    lignes_off = []
-    for i, (_, l) in enumerate(ed.iterrows(), start=1):
-        for j, n in enumerate(noms):
-            pu = to_num(l[f"PU{j}"])
-            if pu <= 0:
-                continue
-            lignes_off.append({"ID_Offre": nouvel_id(10), "ID_TCP": id_tcp, "N° TCP": numero, "N° Ligne": i,
-                               "ID_Ligne_DA": l["ID"], "Désignation": l["Désignation"], "Référence": l["Référence"],
-                               "Unité": l["Unité"], "Quantité": to_num(l["Quantité"]), "Fournisseur": n,
-                               "Prix unitaire HT": pu, "Montant HT": montant_ligne(l["Quantité"], pu),
-                               "Retenu": "TRUE" if n == retenu else "FALSE", "Date TCP": auj.isoformat(),
-                               "N° DA": row["N° DA"], "Chantier": row["Chantier"]})
     hist = ctx.load("HISTORIQUE_ARTICLES")
     codes = dict(zip(hist["ID_Ligne"].map(as_text), hist["Code Article"].map(as_text)))
-    for o in lignes_off:
-        o["Code Article"] = codes.get(as_text(o["ID_Ligne_DA"]), "")
+    lignes_off = []
+    for i, l in ed.iterrows():
+        for n in noms:
+            prix = pu.at[i, n]
+            if prix <= 0:
+                continue
+            lignes_off.append({"ID_Offre": nouvel_id(10), "ID_TCP": id_tcp, "N° TCP": numero, "N° Ligne": i + 1,
+                               "ID_Ligne_DA": l["ID"], "Code Article": codes.get(as_text(l["ID"]), ""),
+                               "Désignation": l["Désignation"], "Référence": l["Référence"], "Unité": l["Unité"],
+                               "Quantité": to_num(l["Quantité"]), "Fournisseur": n, "Prix unitaire HT": prix,
+                               "Montant HT": montant_ligne(l["Quantité"], prix),
+                               "Retenu": "TRUE" if retenus[i] == n else "FALSE", "Date TCP": auj.isoformat(),
+                               "N° DA": row["N° DA"], "Chantier": row["Chantier"]})
     with st.spinner("Enregistrement du TCP…"):
         store.append("TCP_OFFRES", lignes_off)
         store.append("TCP", [row])
         _ajoute_fournisseurs(ctx, noms)
         ctx.refresh()
     pdf = pdf_tcp(ctx, row, lignes_off)
-    st.session_state.tcp_ok = {"numero": numero, "pdf": pdf, "id_da": da["_id"], "id_tcp": id_tcp}
+    st.session_state.tcp_ok = {"numero": numero, "pdf": pdf, "id_da": da["_id"], "id_tcp": id_tcp, "fours": fours_ret}
     st.rerun()
 
 
@@ -367,12 +409,29 @@ def pdf_tcp(ctx, tcp: dict, offres_rows: list[dict] | None = None) -> bytes:
     for r in sorted(offres_rows, key=lambda r: to_num(r["N° Ligne"])):
         k = as_text(r["ID_Ligne_DA"]) or as_text(r["N° Ligne"])
         l = lignes.setdefault(k, {"Désignation": r["Désignation"], "Référence": r["Référence"], "Unité": r["Unité"],
-                                  "Quantité": r["Quantité"], "prix": {}})
+                                  "Quantité": r["Quantité"], "prix": {}, "retenu": ""})
         l["prix"][as_text(r["Fournisseur"])] = to_num(r["Prix unitaire HT"])
+        if as_text(r["Retenu"]).upper() in ("TRUE", "1", "VRAI"):
+            l["retenu"] = as_text(r["Fournisseur"])
     p = params(ctx)
     ch = as_text(tcp.get("Chantier"))
     return build_tcp_pdf({**tcp, "Taux TVA": p.get("Taux TVA (%)")}, fours, list(lignes.values()), p,
                          ctx.refs()["chantiers"].get(ch, ch))
+
+
+def fournisseurs_tcp(ctx, id_tcp: str) -> dict[str, dict]:
+    """Fournisseurs retenus d'un TCP -> {nom: {ID_Ligne_DA: prix}} et BC déjà émis pour chacun."""
+    o = ctx.load("TCP_OFFRES")
+    o = o.loc[(o["ID_TCP"].map(as_text) == id_tcp) & o["Retenu"].map(lambda v: as_text(v).upper() in ("TRUE", "1", "VRAI")).astype(bool)]
+    out = {}
+    for n, g in o.groupby(o["Fournisseur"].map(as_text)):
+        out[n] = {"prix": dict(zip(g["ID_Ligne_DA"].map(as_text), g["Prix unitaire HT"].map(to_num))),
+                  "montant": g["Montant HT"].map(to_num).sum()}
+    bc = ctx.load("BC")
+    bc = bc.loc[(bc["ID_TCP"].map(as_text) == id_tcp) & bc["Statut"].map(as_text).isin(BC_ACTIFS).astype(bool)]
+    for n in out:
+        out[n]["bc"] = ", ".join(bc.loc[bc["Fournisseur"].map(as_text) == n, "N° BC"].map(as_text))
+    return out
 
 
 def _liste_tcp(ctx):
@@ -384,18 +443,22 @@ def _liste_tcp(ctx):
     v["Date"] = v["Date TCP"].map(fmt_date)
     v["Retenu HT"] = v["Montant retenu HT"].map(fmt_montant)
     st.dataframe(v[["N° TCP", "Date", "N° DA", "Chantier", "Fournisseurs consultés", "Fournisseur retenu",
-                    "Retenu HT", "Statut", "N° BC", "Acheteur"]], hide_index=True, width="stretch")
+                    "Retenu HT", "Statut", "N° BC", "Acheteur"]].rename(columns={"Fournisseur retenu": "Retenus"}),
+                 hide_index=True, width="stretch")
     lab = {as_text(r["ID_TCP"]): f"{as_text(r['N° TCP'])} · {as_text(r['N° DA'])} · {as_text(r['Statut'])}"
            for _, r in v.iterrows()}
     sel = st.selectbox("TCP", list(lab), format_func=lab.get, index=None, key="tcp-sel", placeholder="Choisir un TCP")
     if not sel:
         return
     t = v.loc[v["ID_TCP"].map(as_text) == sel].iloc[0].to_dict()
+    fr = fournisseurs_tcp(ctx, sel)
+    st.dataframe(pd.DataFrame([{"Fournisseur retenu": n, "Montant HT": fmt_montant(x["montant"]),
+                                "BC émis": x["bc"] or "—"} for n, x in fr.items()]), hide_index=True, width="stretch")
     c1, c2, c3 = st.columns(3)
     c1.download_button("Télécharger / imprimer", pdf_tcp(ctx, t), file_name=f"{as_text(t['N° TCP'])}.pdf",
                        mime="application/pdf", type="primary", key="tcp-dl")
-    if as_text(t["Statut"]) == "Établi":
-        c2.button("Préparer le BC", key="tcp-bc2", on_click=_prepare_bc, args=(as_text(t["ID_DA"]), sel))
+    if as_text(t["Statut"]) in ("Établi", "BC partiel"):
+        c2.button("Préparer les BC", key="tcp-bc2", on_click=_prepare_bc, args=(as_text(t["ID_DA"]), sel))
         if c3.button("Abandonner ce TCP", key="tcp-ab"):
             ctx.get_store().update("TCP", "ID_TCP", sel, {"Statut": "Abandonné"})
             ctx.refresh()
@@ -411,6 +474,20 @@ def _prepare_bc(id_da: str, id_tcp: str):
     st.session_state["bc_prepare"] = True
 
 
+def maj_statut_tcp(ctx, id_tcp: str):
+    """Établi -> BC partiel -> BC émis selon les fournisseurs retenus déjà commandés (lecture directe)."""
+    if not id_tcp:
+        return
+    store = ctx.get_store()
+    o, bc = store.read("TCP_OFFRES"), store.read("BC")
+    o = o.loc[(o["ID_TCP"].map(as_text) == id_tcp) & o["Retenu"].map(lambda v: as_text(v).upper() in ("TRUE", "1", "VRAI")).astype(bool)]
+    ret = set(o["Fournisseur"].map(as_text))
+    bc = bc.loc[(bc["ID_TCP"].map(as_text) == id_tcp) & bc["Statut"].map(as_text).isin(BC_ACTIFS).astype(bool)]
+    faits = set(bc["Fournisseur"].map(as_text)) & ret
+    statut = "Établi" if not faits else ("BC émis" if faits >= ret else "BC partiel")
+    store.update("TCP", "ID_TCP", id_tcp, {"Statut": statut, "N° BC": ", ".join(bc["N° BC"].map(as_text))})
+
+
 # --------------------------------------------------------------------------- BC
 def pdf_bc(ctx, bc: dict, lignes: list[dict] | None = None) -> bytes:
     if lignes is None:
@@ -420,6 +497,13 @@ def pdf_bc(ctx, bc: dict, lignes: list[dict] | None = None) -> bytes:
     return build_bc_pdf(bc, lignes, params(ctx), ctx.refs()["chantiers"].get(ch, ch))
 
 
+def _bc_suivant():
+    ok = st.session_state.pop("bc_ok", {}) or {}
+    if ok.get("suite"):
+        st.session_state["bc-da"], st.session_state["bc-tcp"] = ok["suite"]
+    st.session_state["bc-mode"] = "Nouveau BC"
+
+
 def _vue_bc(ctx):
     if st.session_state.get("bc_ok"):
         ok = st.session_state["bc_ok"]
@@ -427,9 +511,10 @@ def _vue_bc(ctx):
         c1, c2 = st.columns(2)
         c1.download_button("Télécharger le BC (non validé)", ok["pdf"], file_name=f"{ok['numero']}_NON_VALIDE.pdf",
                            mime="application/pdf", key="bc-pdf-ok")
-        if c2.button("Nouveau BC", type="primary", key="bc-new"):
-            del st.session_state["bc_ok"]
-            st.rerun()
+        if ok.get("suite"):
+            st.info("Ce BC vient d'un TCP : cliquez sur « Nouveau BC » pour émettre celui du fournisseur suivant "
+                    "(la DA et le TCP restent sélectionnés).")
+        c2.button("Nouveau BC", type="primary", key="bc-new", on_click=_bc_suivant)
         return
     mode = st.radio("BC", ["Nouveau BC", "Bons de commande émis"], horizontal=True, label_visibility="collapsed",
                     key="bc-mode")
@@ -443,22 +528,25 @@ def _vue_bc(ctx):
     sl = suivi_lignes(ctx)
     lignes = sl.loc[(sl["ID_DA"].map(as_text) == da["_id"]) & (sl["Reste à commander"] > 0)].sort_values("N° Ligne")
 
-    # ---- TCP éventuel
+    # ---- TCP éventuel : un BC par fournisseur retenu
     tcp = ctx.load("TCP")
-    tcp = tcp.loc[(tcp["ID_DA"].map(as_text) == da["_id"]) & (tcp["Statut"].map(as_text) == "Établi")]
+    tcp = tcp.loc[(tcp["ID_DA"].map(as_text) == da["_id"]) & tcp["Statut"].map(as_text).isin(["Établi", "BC partiel"]).astype(bool)]
     lab_tcp = {"": "Aucun — saisie directe des prix"}
-    lab_tcp.update({as_text(r["ID_TCP"]): f"{as_text(r['N° TCP'])} · retenu : {as_text(r['Fournisseur retenu'])} "
-                                          f"({fmt_montant(r['Montant retenu HT'])} FCFA HT)" for _, r in tcp.iterrows()})
+    lab_tcp.update({as_text(r["ID_TCP"]): f"{as_text(r['N° TCP'])} · retenus : {as_text(r['Fournisseur retenu'])}"
+                    for _, r in tcp.iterrows()})
     if st.session_state.get("bc-tcp") not in lab_tcp:
         st.session_state["bc-tcp"] = ""
-    id_tcp = st.selectbox("À partir d'un TCP (facultatif)", list(lab_tcp), format_func=lab_tcp.get, key="bc-tcp")
+    c1, c2 = st.columns(2)
+    id_tcp = c1.selectbox("À partir d'un TCP (facultatif)", list(lab_tcp), format_func=lab_tcp.get, key="bc-tcp")
     t = tcp.loc[tcp["ID_TCP"].map(as_text) == id_tcp].iloc[0].to_dict() if id_tcp else None
     prix_tcp, four_def, cond_def = {}, "", ""
     if t:
-        four_def = as_text(t["Fournisseur retenu"])
-        o = ctx.load("TCP_OFFRES")
-        o = o.loc[(o["ID_TCP"].map(as_text) == id_tcp) & (o["Fournisseur"].map(as_text) == four_def)]
-        prix_tcp = dict(zip(o["ID_Ligne_DA"].map(as_text), o["Prix unitaire HT"].map(to_num)))
+        fr = fournisseurs_tcp(ctx, id_tcp)
+        noms_fr = sorted(fr, key=lambda n: (bool(fr[n]["bc"]), n))  # ceux sans BC d'abord
+        four_def = c2.selectbox("Fournisseur retenu du TCP", noms_fr, key=f"bc-tcpf-{id_tcp}",
+                                format_func=lambda n: f"{n} — {fmt_montant(fr[n]['montant'])} F HT"
+                                                      + (f" (déjà commandé : {fr[n]['bc']})" if fr[n]["bc"] else ""))
+        prix_tcp = fr[four_def]["prix"]
         try:
             cond_def = next((as_text(x.get("Condition")) for x in json.loads(as_text(t["Conditions offres"]))
                              if as_text(x.get("Nom")) == four_def), "")
@@ -472,7 +560,7 @@ def _vue_bc(ctx):
         fours = [four_def] + fours
     if cond_def and cond_def not in conds:
         conds = [cond_def] + conds
-    k = f"{da['_id']}-{id_tcp}"
+    k = f"{da['_id']}-{id_tcp}-{four_def}"
     c1, c2 = st.columns(2)
     four = c1.selectbox("Fournisseur", fours, index=fours.index(four_def) if four_def else None,
                         accept_new_options=True, key=f"bc-four-{k}", placeholder="Choisir ou saisir")
@@ -480,12 +568,9 @@ def _vue_bc(ctx):
     c1, c2 = st.columns(2)
     cond = c1.selectbox("Conditions de règlement", conds, index=conds.index(cond_def) if cond_def else None,
                         accept_new_options=True, key=f"bc-cond-{k}", placeholder="Choisir ou saisir")
-    parcs = sorted({as_text(x) for x in lignes["Code_Parc"] if as_text(x)})
-    code_parc = c2.text_input("Code parc", value=", ".join(parcs), key=f"bc-parc-{k}")
-    c1, c2 = st.columns(2)
-    magasin = c1.text_input("Magasin", key=f"bc-mag-{k}")
+    magasin = c2.text_input("Magasin", key=f"bc-mag-{k}")
     taux = to_num(p.get("Taux TVA (%)"))
-    tva_on = c2.checkbox(f"Appliquer la TVA ({fmt_montant(taux, 1).rstrip('0').rstrip(',')} %)", value=True,
+    tva_on = st.checkbox(f"Appliquer la TVA ({fmt_montant(taux, 1).rstrip('0').rstrip(',')} %)", value=True,
                          key=f"bc-tva-{k}")
     obs = st.text_input("Observations", key=f"bc-obs-{k}")
 
@@ -494,11 +579,12 @@ def _vue_bc(ctx):
     grille = pd.DataFrame({
         "Inclure": True, "ID": lignes["_id"].values, "Code Article": lignes["Code Article"].map(as_text).values,
         "Désignation": lignes["Désignation"].map(as_text).values, "Référence": lignes["Référence"].map(as_text).values,
+        "Code parc": lignes["Code_Parc"].map(as_text).values,
         "Unité": lignes["Colisage"].map(as_text).values, "Reste DA": lignes["Reste à commander"].values,
         "Quantité": lignes["Reste à commander"].values,
         "Prix unitaire HT": [prix_tcp.get(i) for i in lignes["_id"]], "Remise %": 0.0})
-    if prix_tcp:  # lignes non chiffrées par le fournisseur retenu : décochées
-        grille["Inclure"] = grille["Prix unitaire HT"].map(lambda x: to_num(x) > 0)
+    if t:  # seules les lignes attribuées à ce fournisseur dans le TCP sont cochées
+        grille["Inclure"] = grille["ID"].map(lambda i: i in prix_tcp)
     ed = st.data_editor(
         grille, hide_index=True, width="stretch", key=f"bc-grille-{k}",
         disabled=["Désignation", "Reste DA"],
@@ -516,7 +602,8 @@ def _vue_bc(ctx):
     with st.expander(f"Ajouter un article hors DA ({len(st.session_state[extra_key])})"):
         des, ref, code, col_def, cles = ctx.picker(f"bcx-{k}")
         with st.form(f"bcx-form-{k}-{des}-{ref}", clear_on_submit=True):
-            a1, a2, a3, a4 = st.columns(4)
+            a1, a2, a3, a4, a5 = st.columns(5)
+            parc_x = a5.text_input("Code parc", placeholder="Facultatif")
             un = a1.selectbox("Unité", COLISAGES, index=COLISAGES.index(col_def) if col_def in COLISAGES else 0)
             q = a2.number_input("Quantité", min_value=0.0, value=1.0, step=1.0)
             pu = a3.number_input("P.U. HT", min_value=0.0, step=100.0)
@@ -524,7 +611,8 @@ def _vue_bc(ctx):
             if st.form_submit_button("Ajouter au BC"):
                 if des and q > 0:
                     st.session_state[extra_key].append({"ID": "", "Code Article": code or "", "Désignation": des,
-                                                        "Référence": ref, "Unité": un, "Quantité": q,
+                                                        "Référence": ref, "Code parc": parc_x.strip().upper(),
+                                                        "Unité": un, "Quantité": q,
                                                         "Prix unitaire HT": pu, "Remise %": rem})
                     for c in cles:
                         st.session_state.pop(c, None)
@@ -567,7 +655,8 @@ def _vue_bc(ctx):
                 st.error(e)
             return
         entete = {"da": da, "four": as_text(four).upper(), "date": date_bc, "cond": as_text(cond),
-                  "parc": code_parc.strip(), "magasin": magasin.strip(), "obs": obs.strip(),
+                  "parc": ", ".join(dict.fromkeys(as_text(x.get("Code parc")) for x in tout if as_text(x.get("Code parc")))),
+                  "magasin": magasin.strip(), "obs": obs.strip(),
                   "taux": taux if tva_on else 0, "tot": tot, "id_tcp": id_tcp, "tcp": t}
         _enregistre_bc(ctx, entete, tout)
         st.session_state.pop(extra_key, None)
@@ -595,7 +684,7 @@ def _enregistre_bc(ctx, e: dict, lignes: list[dict]):
             rows.append({"ID_LigneBC": nouvel_id(10), "ID_BC": id_bc, "N° BC": numero, "N° Ligne": i,
                          "ID_Ligne_DA": as_text(l.get("ID")), "Code Article": as_text(l.get("Code Article")),
                          "Désignation": as_text(l["Désignation"]), "Référence": as_text(l.get("Référence")),
-                         "Unité": as_text(l.get("Unité")), "Quantité": to_num(l["Quantité"]),
+                         "Code_Parc": as_text(l.get("Code parc")).upper(), "Unité": as_text(l.get("Unité")), "Quantité": to_num(l["Quantité"]),
                          "Prix unitaire HT": to_num(l["Prix unitaire HT"]), "Remise %": to_num(l.get("Remise %")),
                          "Montant HT": montant_ligne(l["Quantité"], l["Prix unitaire HT"], l.get("Remise %")),
                          "Fournisseur": e["four"], "Date BC": d, "Chantier": as_text(da["Chantier"]),
@@ -609,13 +698,14 @@ def _enregistre_bc(ctx, e: dict, lignes: list[dict]):
               "Observations": e["obs"], "Créé le": maintenant()}
         store.append("BC_LIGNES", rows)
         store.append("BC", [bc])
-        if e["id_tcp"]:
-            store.update("TCP", "ID_TCP", e["id_tcp"], {"Statut": "BC émis", "N° BC": numero})
+        maj_statut_tcp(ctx, e["id_tcp"])
         _ajoute_fournisseurs(ctx, [e["four"]])
         maj_lignes_da(ctx, {r["ID_Ligne_DA"] for r in rows if r["ID_Ligne_DA"]})
         ctx.refresh()
     st.session_state.bc_ok = {"numero": numero, "pdf": build_bc_pdf(bc, rows, params(ctx),
                                                                     ctx.refs()["chantiers"].get(bc["Chantier"], bc["Chantier"]))}
+    if e["id_tcp"]:  # TCP multi-fournisseurs : on reste sur la DA et le TCP pour le BC suivant
+        st.session_state.bc_ok["suite"] = (da["_id"], e["id_tcp"])
     for key in ("bc-da", "bc-tcp"):
         st.session_state.pop(key, None)
 
@@ -668,7 +758,8 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
                 f"**{as_text(b['Statut'])}**")
     st.caption(f"{fmt_date(b['Date BC'])} · {as_text(b['Condition règlement'])} · émis par {as_text(b['Acheteur'])}"
                + (f" · TCP {as_text(b['N° TCP'])}" if as_text(b.get("N° TCP")) else ""))
-    v = l[["Désignation", "Référence", "Unité", "Quantité", "Prix unitaire HT", "Remise %", "Montant HT"]].copy()
+    v = l[["Désignation", "Référence", "Code_Parc", "Unité", "Quantité", "Prix unitaire HT", "Remise %",
+           "Montant HT"]].rename(columns={"Code_Parc": "Code parc"}).copy()
     v["Prix unitaire HT"] = v["Prix unitaire HT"].map(fmt_montant)
     v["Montant HT"] = v["Montant HT"].map(fmt_montant)
     st.dataframe(v, hide_index=True, width="stretch")
@@ -686,6 +777,7 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
         if c2.button("Annuler ce BC (libère les quantités de la DA)", key=f"{key}-ann"):
             ctx.get_store().update("BC", "ID_BC", as_text(b["ID_BC"]), {"Statut": "Annulé"})
             maj_lignes_da(ctx, {as_text(x) for x in l["ID_Ligne_DA"] if as_text(x)})
+            maj_statut_tcp(ctx, as_text(b.get("ID_TCP")))
             ctx.refresh()
             st.rerun()
 
@@ -739,6 +831,8 @@ def onglet_validation_bc(ctx):
                 bl = ctx.load("BC_LIGNES")
                 ids = set(bl.loc[bl["ID_BC"].map(as_text).isin(changes).astype(bool), "ID_Ligne_DA"].map(as_text)) - {""}
                 maj_lignes_da(ctx, ids)
+                for it in set(bc.loc[bc["ID_BC"].map(as_text).isin(changes).astype(bool), "ID_TCP"].map(as_text)) - {""}:
+                    maj_statut_tcp(ctx, it)
             ctx.refresh()
         st.session_state.vbc_v = version + 1
         st.session_state.vbc_msg = (f"{len(changes)} BC passé(s) en « {action} »."
@@ -951,4 +1045,5 @@ def analyses_achats(ctx):
     c1.metric("Délai moyen DA validée → BC", f"{sum(delais) / len(delais):.1f} j" if delais else "–")
     c2.metric("BC issus d'un TCP", f"{(val['ID_TCP'].map(as_text) != '').mean():.0%}" if len(val) else "–")
     ecart = (tc["Montant retenu HT"].map(to_num) - tc["Montant moins-disant HT"].map(to_num)).sum() if len(tc) else 0
-    c3.metric("Surcoût choisi vs moins-disant (TCP)", f"{fmt_montant(ecart)} F")
+    c3.metric("Surcoût des choix vs meilleur prix par article (TCP)", f"{fmt_montant(ecart)} F",
+              help="Montant retenu − somme des prix les plus bas, sur les TCP non abandonnés")
