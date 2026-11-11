@@ -158,6 +158,14 @@ class GoogleSheetStore:
             batch.append({"range": a1, "values": [[_clean(val)]]})
         _retry(ws.batch_update, batch)  # raw=True par défaut : valeurs écrites telles quelles
 
+    def rewrite(self, table: str, df: pd.DataFrame):
+        """Réécrit tout l'onglet avec les lignes de df (archivage annuel)."""
+        header = self._headers[table]
+        data = [header] + [[_clean(r.get(c, "")) for c in header] for r in df.to_dict("records")]
+        ws = self._ws[table]
+        _retry(ws.batch_clear, ["A2:ZZ"])
+        _retry(ws.update, data, "A1", raw=True)
+
     def update_many(self, table: str, key_col: str, changes: dict[str, dict]):
         """Plusieurs lignes en 2 appels Google : lecture des clés, puis écriture groupée."""
         if not changes:
@@ -267,3 +275,14 @@ class ExcelStore:
     def update_many(self, table: str, key_col: str, changes: dict[str, dict]):
         for key, values in changes.items():
             self.update(table, key_col, key, values)
+
+    def rewrite(self, table: str, df: pd.DataFrame):
+        from openpyxl import load_workbook
+        with self._lock:
+            wb = load_workbook(self.path)
+            ws = wb[table]
+            header = [c.value for c in ws[1]]
+            ws.delete_rows(2, ws.max_row)
+            for r in df.to_dict("records"):
+                ws.append([_clean(r.get(c, "")) for c in header])
+            wb.save(self.path)
