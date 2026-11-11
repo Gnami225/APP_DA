@@ -138,3 +138,57 @@ def send_email(cfg: dict, to: list[str], subject: str, body: str,
         s.login(cfg["user"], cfg["password"])
         s.send_message(msg)
     return True
+
+
+# --------------------------------------------------------------------------- achats
+def to_num(v) -> float:
+    """Nombre tolérant : « 1 250 000 », « 12,5 », vide -> 0."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v) if v == v else 0.0  # NaN -> 0
+    t = as_text(v).replace(" ", "").replace(" ", "").replace(" ", "").replace(",", ".")
+    try:
+        return float(t) if t else 0.0
+    except ValueError:
+        return 0.0
+
+
+def fmt_montant(v, decimales: int = 0) -> str:
+    """1250000 -> « 1 250 000 » (séparateur espace, format FCFA)."""
+    f = to_num(v)
+    s = f"{f:,.{decimales}f}".replace(",", " ").replace(".", ",")
+    return s
+
+
+def montant_ligne(qte, pu, remise_pct=0) -> float:
+    return round(to_num(qte) * to_num(pu) * (1 - to_num(remise_pct) / 100), 2)
+
+
+def totaux(lignes: list[dict], taux_tva: float, appliquer_tva: bool = True) -> dict:
+    ht = round(sum(montant_ligne(l.get("Quantité"), l.get("Prix unitaire HT"), l.get("Remise %")) for l in lignes))
+    tva = round(ht * taux_tva / 100) if appliquer_tva else 0
+    return {"Total HT": ht, "Montant TVA": tva, "Total TTC": ht + tva}
+
+
+def numero_bc(prefixe: str, numero: int) -> str:
+    """Préfixe + numéro sur 6 chiffres : BC-005944."""
+    return f"{prefixe}{int(numero):06d}"
+
+
+def next_numero_tcp(tcp: pd.DataFrame, prefixe: str, annee: int) -> str:
+    """TCP-<AAAA>-<NNNN>, séquence annuelle."""
+    base = f"{prefixe}{annee}-"
+    seqs = [0]
+    for n in tcp.get("N° TCP", pd.Series(dtype=str)).map(as_text):
+        if n.startswith(base):
+            m = re.search(r"(\d+)$", n)
+            if m:
+                seqs.append(int(m.group(1)))
+    return f"{base}{max(seqs) + 1:04d}"
+
+
+def nouvel_id(n: int = 8) -> str:
+    return uuid.uuid4().hex[:n]
+
+
+def maintenant() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
