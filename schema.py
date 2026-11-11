@@ -26,7 +26,8 @@ TABLES = {
     # ---- volet Achats
     "PARAMETRES": ["Paramètre", "Valeur"],
     "CONDITIONS_REGLEMENT": ["Condition"],
-    "FOURNISSEURS": ["Code Fournisseur", "Nom", "Contact", "Téléphone", "Email", "NCC", "Adresse", "Actif"],
+    "FOURNISSEURS": ["Code Fournisseur", "Nom", "Contact", "Téléphone", "Email", "NCC", "Adresse", "Actif",
+                     "Spécialités"],
     "BC": ["ID_BC", "N° BC", "Date BC", "ID_DA", "N° DA", "Chantier", "Code Parc", "Magasin", "Fournisseur",
            "Condition règlement", "Total HT", "Taux TVA", "Montant TVA", "Total TTC", "Statut", "Acheteur",
            "Validé par", "Date validation", "Motif rejet", "ID_TCP", "N° TCP", "Observations", "Créé le"],
