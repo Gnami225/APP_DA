@@ -129,17 +129,22 @@ def maj_lignes_da(ctx, ids_lignes: set[str]):
         idl = as_text(l["ID_Ligne"])
         b = bl.loc[(bl["ID_Ligne_DA"].map(as_text) == idl).astype(bool)]
         q = sum(to_num(x) for x in b["Quantité"])
-        statut_av = as_text(l["Statut ligne"])
-        if statut_av in ("Livrée", "Livrée partielle", "Annulée"):
-            statut = statut_av
+        ql = sum(to_num(x) for x in b["Qté livrée"])
+        qda = to_num(l["Quantité"])
+        dates = [as_text(x) for x in b["Date livraison"] if as_text(x)]
+        if as_text(l["Statut ligne"]) == "Annulée":
+            statut = "Annulée"
+        elif ql > 0:
+            statut = "Livrée" if ql + 1e-9 >= qda else "Livrée partielle"
         elif q <= 0:
             statut = "À commander"
-        elif q + 1e-9 < to_num(l["Quantité"]):
+        elif q + 1e-9 < qda:
             statut = "Commandée partielle"
         else:
             statut = "Commandée"
         last = b.iloc[-1] if len(b) else None
-        changes[idl] = {"Statut ligne": statut,
+        changes[idl] = {"Statut ligne": statut, "Qté livrée": ql if ql else "",
+                        "Date livraison": max(dates) if dates else "",
                         "N° BC": ", ".join(dict.fromkeys(as_text(x) for x in b["N° BC"])),
                         "Fournisseur": as_text(last["Fournisseur"]) if last is not None else "",
                         "Prix unitaire HT": to_num(last["Prix unitaire HT"]) if last is not None else ""}
@@ -148,13 +153,16 @@ def maj_lignes_da(ctx, ids_lignes: set[str]):
 
 # =========================================================================== onglet Achats
 def onglet_achats(ctx):
-    t1, t2, t3, t4 = st.tabs(["DA à traiter", "Tableaux comparatifs (TCP)", "Bons de commande", "Fournisseurs"])
+    t1, t2, t3, t5, t4 = st.tabs(["DA à traiter", "Tableaux comparatifs (TCP)", "Bons de commande",
+                                  "Suivi livraisons", "Fournisseurs"])
     with t1:
         _vue_da(ctx)
     with t2:
         _vue_tcp(ctx)
     with t3:
         _vue_bc(ctx)
+    with t5:
+        onglet_livraisons(ctx)
     with t4:
         _vue_fournisseurs(ctx)
 
@@ -770,7 +778,8 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
     st.caption(f"{fmt_date(b['Date BC'])} · {as_text(b['Condition règlement'])} · émis par {as_text(b['Acheteur'])}"
                + (f" · TCP {as_text(b['N° TCP'])}" if as_text(b.get("N° TCP")) else ""))
     v = l[["Désignation", "Référence", "Code_Parc", "Unité", "Quantité", "Prix unitaire HT", "Remise %",
-           "Montant HT", "TVA %"]].rename(columns={"Code_Parc": "Code parc"}).copy()
+           "Montant HT", "TVA %", "Qté livrée", "Date livraison"]].rename(columns={"Code_Parc": "Code parc"}).copy()
+    v["Date livraison"] = v["Date livraison"].map(fmt_date)
     v["Prix unitaire HT"] = v["Prix unitaire HT"].map(fmt_montant)
     v["Montant HT"] = v["Montant HT"].map(fmt_montant)
     st.dataframe(v, hide_index=True, width="stretch")
@@ -789,6 +798,204 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
             maj_lignes_da(ctx, {as_text(x) for x in l["ID_Ligne_DA"] if as_text(x)})
             maj_statut_tcp(ctx, as_text(b.get("ID_TCP")))
             ctx.refresh()
+            st.rerun()
+
+
+# =========================================================================== suivi des livraisons
+def _statut_liv(cmd: float, liv: float) -> str:
+    if liv <= 0:
+        return "Non livré"
+    return "Livré" if liv + 1e-9 >= cmd else "Partiel"
+
+
+def maj_livraisons(ctx, ids_bc: set[str]):
+    """Recalcule, à partir de l'onglet LIVRAISONS, les quantités livrées et statuts des BC concernés,
+    puis le suivi des lignes de DA (lecture directe de la base)."""
+    if not ids_bc:
+        return
+    store = ctx.get_store()
+    lv, bl = store.read("LIVRAISONS"), store.read("BC_LIGNES")
+    lv = lv.loc[lv["ID_BC"].map(as_text).isin(ids_bc).astype(bool)]
+    bl = bl.loc[bl["ID_BC"].map(as_text).isin(ids_bc).astype(bool)]
+    ch_l, ch_b = {}, {}
+    for _, l in bl.iterrows():
+        g = lv.loc[lv["ID_LigneBC"].map(as_text) == as_text(l["ID_LigneBC"])]
+        q = sum(to_num(x) for x in g["Qté livrée"])
+        dates = [as_text(x) for x in g["Date livraison"] if as_text(x)]
+        ch_l[as_text(l["ID_LigneBC"])] = {"Qté livrée": q if q else "", "Date livraison": max(dates) if dates else "",
+                                          "Statut livraison": _statut_liv(to_num(l["Quantité"]), q)}
+    for idb in ids_bc:
+        lignes = [ch_l[as_text(i)] for i in bl.loc[bl["ID_BC"].map(as_text) == idb, "ID_LigneBC"]]
+        sts = {x["Statut livraison"] for x in lignes}
+        statut = "Livré" if sts == {"Livré"} else ("Non livré" if sts <= {"Non livré"} else "Partiel")
+        dates = [x["Date livraison"] for x in lignes if x["Date livraison"]]
+        ch_b[idb] = {"Statut livraison": statut, "Date livraison": max(dates) if dates else ""}
+    store.update_many("BC_LIGNES", "ID_LigneBC", ch_l)
+    store.update_many("BC", "ID_BC", ch_b)
+    maj_lignes_da(ctx, {as_text(x) for x in bl["ID_Ligne_DA"] if as_text(x)})
+
+
+def _suivi_bc(ctx) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """BC actifs avec montants commandés / livrés et reliquats, et leurs lignes."""
+    bc, bl = ctx.load("BC"), ctx.load("BC_LIGNES")
+    bc = bc.loc[bc["Statut"].map(as_text).isin(BC_ACTIFS).astype(bool)].copy()
+    bl = bl.loc[bl["ID_BC"].map(as_text).isin(set(bc["ID_BC"].map(as_text))).astype(bool)].copy()
+    bl["Cmd"] = bl["Quantité"].map(to_num)
+    bl["Liv"] = bl["Qté livrée"].map(to_num)
+    bl["Reste"] = (bl["Cmd"] - bl["Liv"]).clip(lower=0)
+    pu = bl.apply(lambda r: montant_ligne(1, r["Prix unitaire HT"], r["Remise %"]), axis=1) if len(bl) else 0
+    bl["HT cmd"] = bl["Cmd"] * pu
+    bl["HT liv"] = bl[["Liv", "Cmd"]].min(axis=1) * pu
+    g = bl.groupby(bl["ID_BC"].map(as_text)).agg(cmd=("HT cmd", "sum"), liv=("HT liv", "sum"))
+    bc["_id"] = bc["ID_BC"].map(as_text)
+    bc["HT commandé"] = bc["_id"].map(g["cmd"]).fillna(0)
+    bc["HT livré"] = bc["_id"].map(g["liv"]).fillna(0)
+    bc["Reliquat HT"] = bc["HT commandé"] - bc["HT livré"]
+    bc["Livraison"] = bc["Statut livraison"].map(as_text).replace("", "Non livré")
+    auj = date.today()
+    bc["Âge (j)"] = bc["Date BC"].map(lambda v: (auj - to_date(v)).days if to_date(v) else None)
+    return bc, bl
+
+
+def onglet_livraisons(ctx):
+    bc, bl = _suivi_bc(ctx)
+    if not len(bc):
+        st.info("Aucun bon de commande à suivre.")
+        return
+    tot = bc["HT commandé"].sum()
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("BC non livrés", int((bc["Livraison"] == "Non livré").sum()))
+    k2.metric("BC partiels", int((bc["Livraison"] == "Partiel").sum()))
+    k3.metric("Reliquat HT", f"{fmt_montant(bc['Reliquat HT'].sum())} F")
+    k4.metric("Taux de service", f"{bc['HT livré'].sum() / tot:.0%}" if tot else "–",
+              help="Montant livré / montant commandé (BC émis et validés)")
+    if st.session_state.get("liv_msg"):
+        st.success(st.session_state.pop("liv_msg"))
+
+    c1, c2, c3 = st.columns(3)
+    sts = c1.multiselect("Livraison", ["Non livré", "Partiel", "Livré"], default=["Non livré", "Partiel"], key="liv-st",
+                         placeholder="Tous")
+    fo = c2.multiselect("Fournisseur", sorted(set(bc["Fournisseur"].map(as_text)) - {""}), key="liv-fo",
+                        placeholder="Tous")
+    q = c3.text_input("N° BC, N° DA ou chantier", key="liv-q")
+    f = bc
+    if sts:
+        f = f.loc[f["Livraison"].isin(sts)]
+    if fo:
+        f = f.loc[f["Fournisseur"].map(as_text).isin(fo)]
+    if q.strip():
+        s = q.strip().lower()
+        f = f.loc[f[["N° BC", "N° DA", "Chantier"]].astype(str).apply(lambda r: s in " ".join(r).lower(), axis=1).astype(bool)]
+    f = f.sort_values("Date BC").head(300)
+
+    version = st.session_state.get("liv_v", 0)
+    v = pd.DataFrame({"✓": False, "ID_BC": f["_id"], "N° BC": f["N° BC"].map(as_text),
+                      "Date BC": f["Date BC"].map(fmt_date), "Chantier": f["Chantier"].map(as_text),
+                      "Fournisseur": f["Fournisseur"].map(as_text), "Statut BC": f["Statut"].map(as_text),
+                      "Livraison": f["Livraison"], "Âge (j)": f["Âge (j)"],
+                      "Reliquat HT": f["Reliquat HT"].map(fmt_montant),
+                      "Dernière livraison": f["Date livraison"].map(fmt_date)})
+    ed = st.data_editor(v, hide_index=True, width="stretch", key=f"liv-ed-{version}",
+                        disabled=[c for c in v.columns if c != "✓"],
+                        column_config={"ID_BC": None, "✓": st.column_config.CheckboxColumn("✓", width="small")})
+    coches = ed.loc[ed["✓"].astype(bool)]
+    a1, a2 = st.columns([1, 2])
+    d_liv = a1.date_input("Date de livraison", value=date.today(), format="DD/MM/YYYY", key="liv-date-lot")
+    if a2.button(f"📦 Marquer livrés en totalité ({len(coches)})", disabled=not len(coches), type="primary",
+                 key="liv-lot"):
+        rows = []
+        for idb in coches["ID_BC"]:
+            b = bc.loc[bc["_id"] == idb].iloc[0]
+            for _, l in bl.loc[(bl["ID_BC"].map(as_text) == idb) & (bl["Reste"] > 0)].iterrows():
+                rows.append(_ligne_livraison(ctx, b, l, l["Reste"], d_liv, "Livraison totale"))
+        _enregistre_livraisons(ctx, rows, set(coches["ID_BC"]))
+        st.session_state.liv_v = version + 1
+        st.session_state.liv_msg = f"{len(coches)} BC marqué(s) livré(s) le {d_liv:%d/%m/%Y}."
+        st.rerun()
+
+    st.markdown("##### Réception d'un BC (livraison partielle ou complète)")
+    lab = {r["_id"]: f"{as_text(r['N° BC'])} · {as_text(r['Fournisseur'])} · {r['Livraison']}" for _, r in f.iterrows()}
+    sel = st.selectbox("Bon de commande", list(lab), format_func=lab.get, index=None, key="liv-sel",
+                       placeholder="Choisir le BC reçu")
+    if sel:
+        _reception_bc(ctx, bc.loc[bc["_id"] == sel].iloc[0], bl.loc[bl["ID_BC"].map(as_text) == sel], version)
+
+
+def _ligne_livraison(ctx, b, l, qte, d_liv, obs) -> dict:
+    return {"ID_Livraison": nouvel_id(10), "ID_BC": as_text(b["ID_BC"]), "N° BC": as_text(b["N° BC"]),
+            "ID_LigneBC": as_text(l["ID_LigneBC"]), "ID_Ligne_DA": as_text(l["ID_Ligne_DA"]),
+            "Désignation": as_text(l["Désignation"]), "Référence": as_text(l["Référence"]), "Unité": as_text(l["Unité"]),
+            "Qté livrée": float(qte), "Date livraison": d_liv.isoformat(), "Observation": obs,
+            "Fournisseur": as_text(b["Fournisseur"]), "Chantier": as_text(b["Chantier"]), "Saisi par": ctx.user["Nom"],
+            "Créé le": maintenant()}
+
+
+def _enregistre_livraisons(ctx, rows: list[dict], ids_bc: set[str]):
+    with st.spinner("Enregistrement des livraisons…"):
+        if rows:
+            ctx.get_store().append("LIVRAISONS", rows)
+        maj_livraisons(ctx, ids_bc)
+        ctx.refresh()
+
+
+def _reception_bc(ctx, b, lignes: pd.DataFrame, version: int):
+    idb = as_text(b["ID_BC"])
+    st.caption(f"{as_text(b['N° BC'])} du {fmt_date(b['Date BC'])} · {as_text(b['Fournisseur'])} · DA {as_text(b['N° DA'])} · "
+               f"statut BC : {as_text(b['Statut'])}")
+    remplir = st.toggle("Pré-remplir avec tout le reste à livrer", key=f"liv-tout-{idb}-{version}")
+    lg = lignes.sort_values("N° Ligne")
+    g = pd.DataFrame({"ID": lg["ID_LigneBC"].map(as_text).values, "Désignation": lg["Désignation"].map(as_text).values,
+                      "Référence": lg["Référence"].map(as_text).values, "Unité": lg["Unité"].map(as_text).values,
+                      "Commandé": lg["Cmd"].values, "Déjà livré": lg["Liv"].values, "Reste": lg["Reste"].values,
+                      "Qté reçue": lg["Reste"].values if remplir else 0.0})
+    ed = st.data_editor(g, hide_index=True, width="stretch", key=f"liv-rec-{idb}-{version}-{remplir}",
+                        disabled=["Désignation", "Référence", "Unité", "Commandé", "Déjà livré", "Reste"],
+                        column_config={"ID": None,
+                                       "Qté reçue": st.column_config.NumberColumn(min_value=0.0, format="%.2f",
+                                                                                  help="Quantité reçue lors de cette livraison")})
+    c1, c2 = st.columns([1, 2])
+    d_liv = c1.date_input("Date de livraison", value=date.today(), format="DD/MM/YYYY", key=f"liv-d-{idb}")
+    obs = c2.text_input("Observation (N° BL, réserves…)", key=f"liv-o-{idb}")
+    recu = ed.loc[ed["Qté reçue"].map(to_num) > 0]
+    trop = recu.loc[recu["Qté reçue"].map(to_num) > recu["Reste"] + 1e-9]
+    ok_trop = True
+    if len(trop):
+        st.warning("Quantité reçue supérieure au reste pour : " + ", ".join(trop["Désignation"]))
+        ok_trop = st.checkbox("Je confirme la quantité (sur-livraison)", key=f"liv-trop-{idb}")
+    if st.button(f"Enregistrer la réception ({len(recu)} ligne(s))", type="primary", disabled=not len(recu),
+                 key=f"liv-save-{idb}"):
+        if not ok_trop:
+            st.error("Confirmez la sur-livraison ou corrigez les quantités.")
+        else:
+            idx = lg.set_index(lg["ID_LigneBC"].map(as_text))
+            rows = [_ligne_livraison(ctx, b, idx.loc[r["ID"]], to_num(r["Qté reçue"]), d_liv, obs.strip())
+                    for _, r in recu.iterrows()]
+            _enregistre_livraisons(ctx, rows, {idb})
+            st.session_state.liv_v = version + 1
+            st.session_state.liv_msg = f"Réception enregistrée sur {as_text(b['N° BC'])} ({len(rows)} ligne(s))."
+            st.rerun()
+
+    hist = ctx.load("LIVRAISONS")
+    hist = hist.loc[hist["ID_BC"].map(as_text) == idb].sort_values("Créé le")
+    if len(hist):
+        st.markdown("###### Historique des réceptions")
+        h = hist.copy()
+        h["Date"] = h["Date livraison"].map(fmt_date)
+        st.dataframe(h[["Date", "Désignation", "Référence", "Qté livrée", "Unité", "Observation", "Saisi par"]],
+                     hide_index=True, width="stretch")
+        labh = {as_text(r["ID_Livraison"]): f"{fmt_date(r['Date livraison'])} · {as_text(r['Désignation'])} · "
+                                            f"{to_num(r['Qté livrée']):g} {as_text(r['Unité'])}" for _, r in hist.iterrows()}
+        c1, c2 = st.columns([3, 1])
+        sup = c1.selectbox("Corriger une erreur de saisie", list(labh), format_func=labh.get, index=None,
+                           key=f"liv-sup-{idb}", placeholder="Choisir la réception à supprimer")
+        if c2.button("Supprimer", disabled=not sup, key=f"liv-supb-{idb}"):
+            store = ctx.get_store()
+            tout = store.read("LIVRAISONS")
+            store.rewrite("LIVRAISONS", tout.loc[tout["ID_Livraison"].map(as_text) != sup])
+            maj_livraisons(ctx, {idb})
+            ctx.refresh()
+            st.session_state.liv_v = version + 1
+            st.session_state.liv_msg = "Réception supprimée, quantités recalculées."
             st.rerun()
 
 
@@ -951,7 +1158,7 @@ def onglet_parametres(ctx):
 
 # =========================================================================== archivage annuel (admin)
 _ARCHIVE = {"DA": "Date DA", "HISTORIQUE_ARTICLES": "DA_Date", "TCP": "Date TCP", "TCP_OFFRES": "Date TCP",
-            "BC": "Date BC", "BC_LIGNES": "Date BC"}
+            "BC": "Date BC", "BC_LIGNES": "Date BC", "LIVRAISONS": "Date livraison"}
 
 
 def onglet_archivage(ctx):
@@ -1058,3 +1265,27 @@ def analyses_achats(ctx):
     ecart = (tc["Montant retenu HT"].map(to_num) - tc["Montant moins-disant HT"].map(to_num)).sum() if len(tc) else 0
     c3.metric("Surcoût des choix vs meilleur prix par article (TCP)", f"{fmt_montant(ecart)} F",
               help="Montant retenu − somme des prix les plus bas, sur les TCP non abandonnés")
+
+    # livraisons
+    sb, sl = _suivi_bc(ctx)
+    st.markdown("##### Livraisons")
+    if len(sb):
+        sl = sl.copy()
+        db = dict(zip(sb["_id"], sb["Date BC"].map(to_date)))
+        sl["délai"] = [(to_date(d) - db.get(as_text(i))).days if to_date(d) and db.get(as_text(i)) else None
+                       for d, i in zip(sl["Date livraison"], sl["ID_BC"])]
+        dl = sl["délai"].dropna()
+        tot = sb["HT commandé"].sum()
+        l1, l2, l3, l4 = st.columns(4)
+        l1.metric("Taux de service (HT)", f"{sb['HT livré'].sum() / tot:.0%}" if tot else "–")
+        l2.metric("Délai moyen BC → livraison", f"{dl.mean():.1f} j" if len(dl) else "–")
+        l3.metric("Reliquat HT", f"{fmt_montant(sb['Reliquat HT'].sum())} F")
+        l4.metric("BC non livrés > 15 j", int(((sb["Livraison"] != "Livré") & (sb["Âge (j)"].fillna(0) > 15)).sum()))
+        pf = sb.groupby("Fournisseur").agg(BC=("_id", "size"), Commandé=("HT commandé", "sum"), Livré=("HT livré", "sum"),
+                                           Reliquat=("Reliquat HT", "sum"))
+        pf["Taux de service"] = (pf["Livré"] / pf["Commandé"]).map(lambda x: f"{x:.0%}" if x == x else "–")
+        dmoy = sl.assign(F=sl["Fournisseur"].map(as_text)).groupby("F")["délai"].mean()
+        pf["Délai moyen (j)"] = pf.index.map(lambda n: round(dmoy.get(n), 1) if n in dmoy and dmoy.get(n) == dmoy.get(n) else None)
+        for c in ("Commandé", "Livré", "Reliquat"):
+            pf[c] = pf[c].map(fmt_montant)
+        st.dataframe(pf.sort_values("BC", ascending=False), width="stretch")
