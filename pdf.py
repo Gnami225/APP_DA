@@ -222,7 +222,7 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     avert = {"Annulé": "BC ANNULÉ", "Rejeté": "BC REJETÉ"}.get(statut, "")
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=12 * mm, rightMargin=12 * mm,
                             topMargin=11 * mm, bottomMargin=12 * mm, title=numero or "Bon de commande", author=societe)
-    cw = [55 * mm, 29 * mm, 19 * mm, 12 * mm, 14 * mm, 21 * mm, 13 * mm, 23 * mm]   # 186 mm
+    cw = [50 * mm, 27 * mm, 18 * mm, 12 * mm, 13 * mm, 20 * mm, 11 * mm, 11 * mm, 24 * mm]   # 186 mm
     W1, W2, W3 = 64 * mm, 84 * mm, 38 * mm
 
     # ---- en-tête
@@ -256,17 +256,19 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     story = [head, Spacer(1, 3 * mm)]
 
     # ---- lignes
-    th = ["DÉSIGNATION", "RÉFÉRENCE", "CODE PARC", "QTÉ", "UNITÉ", "PRIX UNIT.\n(FCFA)", "REM. %", "MONTANT\n(FCFA)"]
+    th = ["DÉSIGNATION", "RÉFÉRENCE", "CODE PARC", "QTÉ", "UNITÉ", "PRIX UNIT.\n(FCFA)", "REM.\n%", "TVA\n%", "MONTANT HT\n(FCFA)"]
     data = [[_p(h, "th") for h in th]]
     lignes = sorted(lignes, key=lambda l: to_num(l.get("N° Ligne")))
     for l in lignes:
         rem = to_num(l.get("Remise %"))
+        tv = l.get("TVA %")
+        tv = to_num(bc.get("Taux TVA")) if tv is None or as_text(tv) == "" else to_num(tv)
         data.append([_p(l.get("Désignation"), "bc_l"), _p(l.get("Référence"), "bc_c"),
                      _p(l.get("Code_Parc"), "bc_c"), _p(_qte(l.get("Quantité")), "bc_c"), _p(l.get("Unité"), "bc_c"),
-                     _p(fmt_montant(l.get("Prix unitaire HT")), "bc_r"), _p(_qte(rem) if rem else "", "bc_c"),
+                     _p(fmt_montant(l.get("Prix unitaire HT")), "bc_r"), _p(_qte(rem) if rem else "", "bc_c"), _p(_qte(tv), "bc_c"),
                      _p(fmt_montant(montant_ligne(l.get("Quantité"), l.get("Prix unitaire HT"), rem)), "bc_r")])
     for _ in range(len(lignes), NB_LIGNES_BC):
-        data.append([""] * 8)
+        data.append([""] * 9)
     det = Table(data, colWidths=cw, repeatRows=1)
     det.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.6, GRID), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -278,8 +280,8 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     story.append(det)
 
     # ---- pied : conditions, mentions, totaux, signature
-    taux = to_num(bc.get("Taux TVA"))
-    lib_tva = f"MASSE TVA ({_qte(taux)} %)" if taux else "MASSE TVA"
+    t_ent = as_text(bc.get("Taux TVA"))
+    lib_tva = f"MASSE TVA ({_qte(to_num(t_ent))} %)" if t_ent and t_ent != "Mixte" else "MASSE TVA"
     visa = "Signature"
     if statut == "Validé":
         visa = f"Signature\n\nValidé par {as_text(bc.get('Validé par'))}\nle {fmt_date(bc.get('Date validation'))}"
@@ -292,7 +294,7 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
          _p(fmt_montant(bc.get("Montant TVA")), "bc_rb")],
         ["", "", _p("TOTAL TTC", "bc_rb"), _p(fmt_montant(bc.get("Total TTC")), "bc_rb")],
         [_p("Mentionner T.V.A sur facture\nExemplaire à joindre à la facture", "bc_i"), "", _p(visa, "bc_i"), ""],
-    ], colWidths=[sum(cw[:4]), cw[4], cw[5] + cw[6], cw[7]],
+    ], colWidths=[sum(cw[:4]), cw[4], cw[5] + cw[6] + cw[7], cw[8]],
        rowHeights=[6 * mm, 6 * mm, 6 * mm, 20 * mm])
     pied.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.8, GRID),
