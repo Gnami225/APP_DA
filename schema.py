@@ -33,7 +33,7 @@ TABLES = {
            "Validé par", "Date validation", "Motif rejet", "ID_TCP", "N° TCP", "Observations", "Créé le"],
     "BC_LIGNES": ["ID_LigneBC", "ID_BC", "N° BC", "N° Ligne", "ID_Ligne_DA", "Code Article", "Désignation",
                   "Référence", "Code_Parc", "Unité", "Quantité", "Prix unitaire HT", "Remise %", "Montant HT",
-                  "Fournisseur", "Date BC", "Chantier", "N° DA"],
+                  "Fournisseur", "Date BC", "Chantier", "N° DA", "TVA %", "Montant TVA"],
     "TCP": ["ID_TCP", "N° TCP", "Date TCP", "ID_DA", "N° DA", "Chantier", "Fournisseurs consultés",
             "Fournisseur retenu", "Montant retenu HT", "Moins-disant", "Montant moins-disant HT",
             "Motif choix", "Conditions offres", "Acheteur", "Statut", "N° BC", "Observations", "Créé le"],
