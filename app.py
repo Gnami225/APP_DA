@@ -572,9 +572,10 @@ def onglet_admin_da(user: dict):
     if not len(da):
         st.info("Aucune DA pour le moment.")
         return
-    k1, k2 = st.columns(2)
-    k1.metric("DA", int((da["Statut"] != "Rejetée").sum()))
-    k2.metric("Rejetées / écartées", int((da["Statut"] == "Rejetée").sum()))
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Émises", int((da["Statut"] == "Émise").sum()))
+    k2.metric("Validées", int((da["Statut"] == "Validée").sum()))
+    k3.metric("Rejetées", int((da["Statut"] == "Rejetée").sum()))
     r = refs()
     c1, c2, c3 = st.columns([2, 2, 2])
     chs = c1.multiselect("Chantier", sorted(da["Chantier"].map(as_text).unique()),
@@ -593,8 +594,8 @@ def onglet_admin_da(user: dict):
     f = f.sort_values("Créé le", ascending=False)
 
     st.markdown("##### Demandes d'achat")
-    st.caption("Les DA sont transmises directement aux achats, sans étape de validation. "
-               "Le tableau reste modifiable (priorité, responsable, ou statut « Rejetée » pour écarter une DA).")
+    st.caption("Cochez une ou plusieurs DA puis cliquez sur Valider ou Rejeter. "
+               "Vous pouvez aussi modifier directement le tableau (statut, priorité…) puis enregistrer.")
     cols = ["ID_DA", "N° DA", "Date DA", "Chantier", "Demandeur", "Statut", "Priorité",
             "Responsable", "Code DA", "Motif rejet", "Validé par", "Date validation"]
     vue = f[cols].copy()
@@ -604,18 +605,56 @@ def onglet_admin_da(user: dict):
         if c not in ("Date DA", "Date validation"):
             vue[c] = vue[c].map(as_text)
     version = st.session_state.get("adm_v", 0)
+    t1, t2 = st.columns([1, 3])
+    tout = t1.checkbox("Tout cocher", key=f"adm-tout-{version}")
+    if t2.toggle("Seulement les DA à traiter (Émises)", key="adm-emises"):
+        vue = vue.loc[vue["Statut"] == "Émise"]
+    vue.insert(0, "✓", tout)
     ed = st.data_editor(
-        vue, hide_index=True, width="stretch", key=f"adm-da-{version}",
+        vue, hide_index=True, width="stretch", key=f"adm-da-{version}-{tout}",
         disabled=["N° DA", "Date DA", "Chantier", "Demandeur", "Validé par", "Date validation"],
         column_config={
+            "✓": st.column_config.CheckboxColumn("✓", width="small", help="Cocher pour valider / rejeter en un clic"),
             "ID_DA": None,
             "Statut": st.column_config.SelectboxColumn("Statut", options=STATUTS, required=True),
             "Priorité": st.column_config.SelectboxColumn("Priorité", options=PRIORITES, required=True),
             "Motif rejet": st.column_config.TextColumn("Motif rejet", width="medium"),
         })
+    coches = ed.loc[ed["✓"].astype(bool)]
+    n = len(coches)
+    b1, b2, b3, b4 = st.columns([1, 1, 1, 2])
+    motif = b4.text_input("Motif (obligatoire pour rejeter)", key=f"adm-motif-{version}",
+                          label_visibility="collapsed", placeholder="Motif du rejet (obligatoire pour rejeter)")
+    action = None
+    if b1.button(f"✅ Valider ({n})", disabled=n == 0, type="primary", width="stretch", key="adm-ok"):
+        action = "Validée"
+    if b2.button(f"❌ Rejeter ({n})", disabled=n == 0, width="stretch", key="adm-ko"):
+        action = "Rejetée"
+    if b3.button(f"↩ Remettre en Émise ({n})", disabled=n == 0, width="stretch", key="adm-re"):
+        action = "Émise"
+    if action == "Rejetée" and not motif.strip():
+        st.error("Indiquez le motif du rejet avant de cliquer sur Rejeter.")
+        action = None
+    if action:
+        changes = {}
+        for id_da in coches["ID_DA"]:
+            if action == "Émise":
+                changes[id_da] = {"Statut": "Émise", "Validé par": "", "Date validation": "", "Motif rejet": ""}
+            else:
+                changes[id_da] = {"Statut": action, "Validé par": user["Nom"],
+                                  "Date validation": date.today().isoformat(),
+                                  "Motif rejet": motif.strip() if action == "Rejetée" else ""}
+        get_store().update_many("DA", "ID_DA", changes)
+        refresh()
+        if action != "Émise":
+            for id_da in changes:
+                _notifier({"ID_DA": id_da, "Email Demandeur": "x"}, action)
+        st.session_state.adm_v = version + 1
+        st.session_state.adm_msg = f"{n} DA passée(s) en « {action} » : {', '.join(coches['N° DA'])}."
+        st.rerun()
 
     if st.button("Enregistrer les modifications du tableau", key="adm-save"):
-        avant, apres = vue.set_index("ID_DA"), ed.set_index("ID_DA")
+        avant, apres = vue.drop(columns="✓").set_index("ID_DA"), ed.drop(columns="✓").set_index("ID_DA")
         changes, notifs, sans_motif = {}, [], []
         for id_da in apres.index:
             diff = {c: as_text(apres.at[id_da, c]) for c in ["Statut", "Priorité", "Responsable", "Code DA", "Motif rejet"]
@@ -812,7 +851,7 @@ def onglet_acces(user: dict):
         column_config={
             "Poste": st.column_config.SelectboxColumn(options=postes),
             "Rôle": st.column_config.SelectboxColumn(options=ROLES, required=True,
-                                                     help="Acheteur : onglet Achats · Direction : onglet Analyses"),
+                                                     help="Acheteur : onglet Achats · Direction : valide les BC"),
             "Chantier": st.column_config.SelectboxColumn(options=ch_codes),
             "Service": st.column_config.TextColumn(help="Suit automatiquement le poste"),
             "Actif": st.column_config.CheckboxColumn(help="Décocher pour couper l'accès"),
@@ -976,6 +1015,8 @@ def main():
     onglets = {"Nouvelle DA": lambda: onglet_nouvelle(user), "Mes DA": lambda: onglet_mes_da(user)}
     if role in ROLES_ACHATS:
         onglets["Achats"] = lambda: achats.onglet_achats(ctx)
+    if role in ROLES_VALID_BC:
+        onglets["Validation BC"] = lambda: achats.onglet_validation_bc(ctx)
     if admin:
         onglets["Administration"] = lambda: onglet_admin(user)
     if role in ROLES_ADMIN | ROLES_VALID_BC:
