@@ -31,7 +31,7 @@ TABLES = {
            "Condition règlement", "Total HT", "Taux TVA", "Montant TVA", "Total TTC", "Statut", "Acheteur",
            "Validé par", "Date validation", "Motif rejet", "ID_TCP", "N° TCP", "Observations", "Créé le"],
     "BC_LIGNES": ["ID_LigneBC", "ID_BC", "N° BC", "N° Ligne", "ID_Ligne_DA", "Code Article", "Désignation",
-                  "Référence", "Unité", "Quantité", "Prix unitaire HT", "Remise %", "Montant HT",
+                  "Référence", "Code_Parc", "Unité", "Quantité", "Prix unitaire HT", "Remise %", "Montant HT",
                   "Fournisseur", "Date BC", "Chantier", "N° DA"],
     "TCP": ["ID_TCP", "N° TCP", "Date TCP", "ID_DA", "N° DA", "Chantier", "Fournisseurs consultés",
             "Fournisseur retenu", "Montant retenu HT", "Moins-disant", "Montant moins-disant HT",
@@ -54,7 +54,7 @@ ROLES_ACHATS = {"Acheteur", "Admin"}          # voient l'onglet Achats (DA, TCP,
 ROLES_VALID_BC = {"Direction", "Admin"}       # valident les bons de commande
 
 STATUTS_BC = ["Émis", "Validé", "Rejeté", "Annulé"]
-STATUTS_TCP = ["Établi", "BC émis", "Abandonné"]
+STATUTS_TCP = ["Établi", "BC partiel", "BC émis", "Abandonné"]
 
 PARAMETRES_DEFAUT = {  # valeurs initiales, modifiables dans Administration > Paramètres
     "Nom Société": "PUBLIC WORK CONTRACTOR (PWC)",
