@@ -219,8 +219,7 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     numero = as_text(bc.get("N° BC"))
     statut = as_text(bc.get("Statut"))
     societe = as_text(param.get("Nom Société")) or "PUBLIC WORK CONTRACTOR (PWC)"
-    avert = "" if statut == "Validé" else (f"BC {statut.upper()} — NE PAS TRANSMETTRE AU FOURNISSEUR"
-                                           if statut in ("Rejeté", "Annulé") else "BC NON VALIDÉ — EN ATTENTE DE VALIDATION")
+    avert = "BC ANNULÉ" if statut == "Annulé" else ""
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=12 * mm, rightMargin=12 * mm,
                             topMargin=11 * mm, bottomMargin=12 * mm, title=numero or "Bon de commande", author=societe)
     cw = [55 * mm, 29 * mm, 19 * mm, 12 * mm, 14 * mm, 21 * mm, 13 * mm, 23 * mm]   # 186 mm
@@ -282,8 +281,6 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     taux = to_num(bc.get("Taux TVA"))
     lib_tva = f"MASSE TVA ({_qte(taux)} %)" if taux else "MASSE TVA"
     visa = "Signature"
-    if statut == "Validé":
-        visa = f"Signature\n\nValidé par {as_text(bc.get('Validé par'))}\nle {fmt_date(bc.get('Date validation'))}"
     cond = _p(f"<b>Conditions de règlement :</b> {as_text(bc.get('Condition règlement'))}", "bc_l")
     cond.__init__(cond.text.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>"), cond.style)
     obs = as_text(bc.get("Observations"))
