@@ -135,11 +135,36 @@ def _services_pwc() -> bool:
     return True
 
 
-@st.cache_data(ttl=180, show_spinner=False)
+# Onglets qui changent peu (gardés 15 min) et onglets de saisie (gardés 3 min). Les données restent en
+# mémoire du serveur sans copie (cache_resource) : chaque lecture est instantanée.
+STATIQUES = ["ARTICLES", "PARC", "CHANTIERS", "SERVICES", "UTILISATEURS", "PARAMETRES", "CONDITIONS_REGLEMENT",
+             "FOURNISSEURS"]
+TTL = {"statique": 900, "dynamique": 180}
+
+
+@st.cache_resource(show_spinner=False)
+def _memoire() -> dict:
+    import threading
+    return {"lock": threading.Lock(), "statique": None, "dynamique": None, "t_statique": 0.0, "t_dynamique": 0.0,
+            "version": 0}
+
+
 def _load_all() -> dict:
-    """Toute la base en un appel Google, gardée 3 min ; vidée après chaque enregistrement."""
-    _services_pwc()
-    return get_store().read_all()  # un seul appel Google pour tous les onglets
+    """Base en mémoire : un appel Google par groupe d'onglets à recharger, puis lectures instantanées."""
+    import time
+    m = _memoire()
+    with m["lock"]:
+        maintenant = time.time()
+        a_lire = [g for g in ("statique", "dynamique") if m[g] is None or maintenant - m["t_" + g] > TTL[g]]
+        if a_lire:
+            _services_pwc()
+            tables = [t for t in TABLES if (t in STATIQUES) == ("statique" in a_lire)] if len(a_lire) == 1 else None
+            data = get_store().read_all(tables)
+            for g in a_lire:
+                m[g] = {t: df for t, df in data.items() if (t in STATIQUES) == (g == "statique")}
+                m["t_" + g] = maintenant
+            m["version"] += 1
+        return {**m["statique"], **m["dynamique"]}
 
 
 _COLONNES_REQUISES = {"UTILISATEURS": ["Email", "Nom", "Rôle", "Chantier", "Service", "Actif", "PIN", "Poste"]}
@@ -149,6 +174,7 @@ def load(table: str) -> pd.DataFrame:
     df = _load_all().get(table)
     if df is None:  # onglet pas encore créé dans la base : table vide
         df = pd.DataFrame(columns=TABLES.get(table, []))
+    df = df.copy(deep=False)  # protège les données en mémoire (copie légère, instantanée)
     manquantes = [c for c in TABLES.get(table, []) + _COLONNES_REQUISES.get(table, []) if c not in df.columns]
     if manquantes:  # tolère un schema.py ou un Google Sheet en retard d'une version
         df = df.copy()
@@ -160,8 +186,18 @@ def load(table: str) -> pd.DataFrame:
     return df
 
 
-def refresh():
-    _load_all.clear()
+def refresh(statique: bool = True):
+    """Après un enregistrement : relit la base au prochain affichage (seulement les onglets de saisie si
+    statique=False)."""
+    m = _memoire()
+    with m["lock"]:
+        m["dynamique"] = None
+        if statique:
+            m["statique"] = None
+
+
+def version_donnees() -> int:
+    return _memoire()["version"]
 
 
 def refs() -> dict:
@@ -305,6 +341,8 @@ def detail_da(da: dict, key: str):
         lg = lg.sort_values("N° Ligne")[["N° Ligne", "Désignation", "Référence", "Code_Parc",
                                          "Colisage", "Quantité", "Usage", "Statut ligne", "N° BC",
                                          "Qté livrée", "Date livraison"]]
+        lg["Qté livrée"] = lg["Qté livrée"].map(lambda x: f"{float(x):g}" if as_text(x) not in ("", "nan") else "")
+        lg["Date livraison"] = lg["Date livraison"].map(fmt_date)
         st.dataframe(lg, hide_index=True, width="stretch")
     if as_text(da.get("Motif rejet")):
         st.warning(f"Motif du rejet : {as_text(da['Motif rejet'])}")
@@ -376,11 +414,8 @@ def _choisir(cle: str, valeur: str):
 def choisir_article(prefix: str):
     """Désignation puis référence (liste filtrée) : choisir dans le catalogue ou saisir librement.
     Retourne (désignation, référence, code article, colisage par défaut, clés des widgets à vider)."""
-    cat = catalogue()
-    # catalogue : désignation -> {référence -> code article}
-    refs_de = {}
-    for c, x in cat.items():
-        refs_de.setdefault(as_text(x["Désignation"]), {}).setdefault(as_text(x.get("Référence")), c)
+    load("ARTICLES")
+    cat, refs_de = _catalogue(version_donnees())  # désignation -> {référence -> code article}
     desigs = sorted(refs_de)  # uniquement l'onglet ARTICLES de la base
 
     # 1) Désignation : choisir dans la liste OU saisir librement
@@ -427,10 +462,21 @@ def choisir_article(prefix: str):
     return des, ref, code, col_def, [f"{prefix}-des", cle_ref]
 
 
-def catalogue() -> dict:
+@st.cache_resource(show_spinner=False, max_entries=2)
+def _catalogue(version: int) -> tuple[dict, dict]:
+    """Catalogue calculé une fois par version des données (et non à chaque clic)."""
     art = load("ARTICLES")
-    art = art.loc[art["Code Article"].map(as_text) != ""]
-    return {as_text(a["Code Article"]): a for _, a in art.iterrows()}
+    recs = [r for r in art.to_dict("records") if as_text(r.get("Code Article"))]
+    cat = {as_text(r["Code Article"]): r for r in recs}
+    refs_de = {}
+    for c, x in cat.items():
+        refs_de.setdefault(as_text(x["Désignation"]), {}).setdefault(as_text(x.get("Référence")), c)
+    return cat, refs_de
+
+
+def catalogue() -> dict:
+    load("ARTICLES")  # s'assure que les données sont chargées
+    return _catalogue(version_donnees())[0]
 
 
 def onglet_nouvelle(user: dict):
@@ -523,7 +569,7 @@ def onglet_nouvelle(user: dict):
                   "Date besoin": date_besoin, "Observations": observations.strip()}
         with st.spinner("Enregistrement…"):
             da_row, rows = build_da(get_store(), entete, st.session_state.lignes, user)
-            refresh()
+            refresh(statique=False)
             pdf = build_pdf(da_row, rows, r)
         mail = ""
         smtp = _secret("smtp")
@@ -654,7 +700,7 @@ def onglet_admin_da(user: dict):
                                   "Date validation": date.today().isoformat(),
                                   "Motif rejet": motif.strip() if action == "Rejetée" else ""}
         get_store().update_many("DA", "ID_DA", changes)
-        refresh()
+        refresh(statique=False)
         if action != "Émise":
             for id_da in changes:
                 _notifier({"ID_DA": id_da, "Email Demandeur": "x"}, action)
@@ -685,7 +731,7 @@ def onglet_admin_da(user: dict):
             st.info("Aucune modification à enregistrer.")
         else:
             get_store().update_many("DA", "ID_DA", changes)
-            refresh()
+            refresh(statique=False)
             for id_da, statut in notifs:
                 _notifier({"ID_DA": id_da, "Email Demandeur": "x"}, statut)
             st.session_state.adm_v = version + 1
@@ -729,7 +775,7 @@ def onglet_admin_da(user: dict):
                     changes[idl] = diff
             if changes:
                 get_store().update_many("HISTORIQUE_ARTICLES", "ID_Ligne", changes)
-                refresh()
+                refresh(statique=False)
                 st.session_state.adm_v = version + 1
                 st.session_state.adm_msg = f"{len(changes)} ligne(s) mise(s) à jour."
                 st.rerun()
@@ -972,10 +1018,22 @@ def _analyses_da():
 
 
 # --------------------------------------------------------------------------- main
+def _fragment(fn, nom: str):
+    """Exécute fn dans un fragment Streamlit (rafraîchissement local), sinon normalement."""
+    frag = None if os.environ.get("DA_SANS_FRAGMENT") else getattr(st, "fragment", None)
+    if frag is None:
+        return fn()
+
+    def corps():
+        fn()
+    corps.__name__ = corps.__qualname__ = nom.replace("-", "_")
+    return frag(corps)()
+
+
 def contexte(user: dict):
     from types import SimpleNamespace
     return SimpleNamespace(load=load, refresh=refresh, get_store=get_store, refs=refs, picker=choisir_article,
-                           user=user)
+                           user=user, fragment=_fragment)
 
 
 def bloquer_traduction():
@@ -1032,8 +1090,9 @@ def main():
         onglets["Administration"] = lambda: onglet_admin(user)
     if role in ROLES_ADMIN | ROLES_VALID_BC:
         onglets["Analyses"] = lambda: onglet_analyses(ctx)
-    for tab, fn in zip(st.tabs(list(onglets)), onglets.values()):
+    # chaque onglet est un « fragment » : un clic dans un onglet ne recalcule que cet onglet
+    for i, (tab, fn) in enumerate(zip(st.tabs(list(onglets)), onglets.values())):
         with tab:
-            fn()
+            _fragment(fn, f"onglet-{i}")
 
 main()
