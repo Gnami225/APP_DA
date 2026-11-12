@@ -156,9 +156,9 @@ def onglet_achats(ctx):
     vues = {"Demandes d'achat (DA)": _vue_da, "Tableaux comparatifs (TCP)": _vue_tcp, "Bons de commande": _vue_bc}
     if ctx.user["Rôle"] != "Acheteur":  # acheteur : DA, TCP et BC uniquement
         vues.update({"Suivi livraisons": onglet_livraisons, "Fournisseurs": _vue_fournisseurs})
-    for tab, fn in zip(st.tabs(list(vues)), vues.values()):
+    for i, (tab, fn) in enumerate(zip(st.tabs(list(vues)), vues.values())):
         with tab:
-            fn(ctx)
+            ctx.fragment(lambda fn=fn: fn(ctx), f"achats-{i}")
 
 
 def _vue_da(ctx):
@@ -221,8 +221,9 @@ def _vue_tcp(ctx):
         c1, c2, c3 = st.columns(3)
         c1.download_button("Télécharger / imprimer le TCP", ok["pdf"], file_name=f"{ok['numero']}.pdf",
                            mime="application/pdf", type="primary", key="tcp-pdf-ok")
-        c2.button("Préparer les BC de ce TCP", key="tcp-to-bc", on_click=_prepare_bc,
-                  args=(ok["id_da"], ok["id_tcp"]))
+        if c2.button("Préparer les BC de ce TCP", key="tcp-to-bc"):
+            _prepare_bc(ok["id_da"], ok["id_tcp"])
+            st.rerun(scope="app")
         if c3.button("Nouveau TCP", key="tcp-new"):
             del st.session_state["tcp_ok"]
             st.rerun()
@@ -461,10 +462,12 @@ def _liste_tcp(ctx):
     c1.download_button("Télécharger / imprimer", pdf_tcp(ctx, t), file_name=f"{as_text(t['N° TCP'])}.pdf",
                        mime="application/pdf", type="primary", key="tcp-dl")
     if as_text(t["Statut"]) in ("Établi", "BC partiel"):
-        c2.button("Préparer les BC", key="tcp-bc2", on_click=_prepare_bc, args=(as_text(t["ID_DA"]), sel))
+        if c2.button("Préparer les BC", key="tcp-bc2"):
+            _prepare_bc(as_text(t["ID_DA"]), sel)
+            st.rerun(scope="app")
         if c3.button("Abandonner ce TCP", key="tcp-ab"):
             ctx.get_store().update("TCP", "ID_TCP", sel, {"Statut": "Abandonné"})
-            ctx.refresh()
+            ctx.refresh(False)
             st.rerun()
     if st.session_state.get("bc_prepare"):
         st.info("Ouvrez l'onglet « Bons de commande » : la DA et le TCP y sont déjà sélectionnés.")
@@ -774,6 +777,7 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
     v = l[["Désignation", "Référence", "Code_Parc", "Unité", "Quantité", "Prix unitaire HT", "Remise %",
            "Montant HT", "TVA %", "Qté livrée", "Date livraison"]].rename(columns={"Code_Parc": "Code parc"}).copy()
     v["Date livraison"] = v["Date livraison"].map(fmt_date)
+    v["Qté livrée"] = v["Qté livrée"].map(lambda x: f"{to_num(x):g}" if as_text(x) else "")
     v["Prix unitaire HT"] = v["Prix unitaire HT"].map(fmt_montant)
     v["Montant HT"] = v["Montant HT"].map(fmt_montant)
     st.dataframe(v, hide_index=True, width="stretch")
@@ -791,7 +795,7 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
             ctx.get_store().update("BC", "ID_BC", as_text(b["ID_BC"]), {"Statut": "Annulé"})
             maj_lignes_da(ctx, {as_text(x) for x in l["ID_Ligne_DA"] if as_text(x)})
             maj_statut_tcp(ctx, as_text(b.get("ID_TCP")))
-            ctx.refresh()
+            ctx.refresh(False)
             st.rerun()
 
 
@@ -929,7 +933,7 @@ def _enregistre_livraisons(ctx, rows: list[dict], ids_bc: set[str]):
         if rows:
             ctx.get_store().append("LIVRAISONS", rows)
         maj_livraisons(ctx, ids_bc)
-        ctx.refresh()
+        ctx.refresh(False)
 
 
 def _reception_bc(ctx, b, lignes: pd.DataFrame, version: int):
@@ -987,7 +991,7 @@ def _reception_bc(ctx, b, lignes: pd.DataFrame, version: int):
             tout = store.read("LIVRAISONS")
             store.rewrite("LIVRAISONS", tout.loc[tout["ID_Livraison"].map(as_text) != sup])
             maj_livraisons(ctx, {idb})
-            ctx.refresh()
+            ctx.refresh(False)
             st.session_state.liv_v = version + 1
             st.session_state.liv_msg = "Réception supprimée, quantités recalculées."
             st.rerun()
@@ -1044,7 +1048,7 @@ def onglet_validation_bc(ctx):
                 maj_lignes_da(ctx, ids)
                 for it in set(bc.loc[bc["ID_BC"].map(as_text).isin(changes).astype(bool), "ID_TCP"].map(as_text)) - {""}:
                     maj_statut_tcp(ctx, it)
-            ctx.refresh()
+            ctx.refresh(False)
         st.session_state.vbc_v = version + 1
         st.session_state.vbc_msg = (f"{len(changes)} BC passé(s) en « {action} »."
                                     + (f" Ignorés (déjà traités) : {', '.join(non_emis)}." if non_emis else ""))
