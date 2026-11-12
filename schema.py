@@ -49,7 +49,7 @@ TABLES = {
 
 PRIORITES = ["Normale", "Urgente", "Critique"]
 COLISAGES = ["Unité", "Paire", "Paquet", "Carton", "Boîte", "Sac", "Rouleau", "Barre", "Botte", "Pot", "Bidon", "Fût",
-             "ml", "m²", "m³", "kg", "Tonne", "L", "Voyage", "ha", "Jeu", "Lot", "Jour", "Forfait"]
+             "m", "ml", "m²", "m³", "kg", "Tonne", "L", "Voyage", "ha", "Jeu", "Lot", "Jour", "Forfait", "F CFA"]
 HORS_CATALOGUE = "HORS CATALOGUE"
 STATUTS = ["Émise", "Validée", "Rejetée"]
 ANCIENS_STATUTS = {"Soumise": "Émise"}  # DA créées avant le renommage
