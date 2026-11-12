@@ -96,7 +96,9 @@ def _store_google(sheet_id: str, version_schema: str):
     return GoogleSheetStore(_service_account(), sheet_id)
 
 
-VERSION_SCHEMA = hashlib.md5(repr(sorted(TABLES.items())).encode()).hexdigest()[:10]
+# change dès que schema.py ou storage.py change : la connexion en mémoire est alors recréée avec le nouveau code
+VERSION_SCHEMA = hashlib.md5((repr(sorted(TABLES.items())) + (APP_DIR / "storage.py").read_text(encoding="utf-8"))
+                             .encode()).hexdigest()[:10]
 
 
 def get_store():
@@ -159,7 +161,11 @@ def _load_all() -> dict:
         if a_lire:
             _services_pwc()
             tables = [t for t in TABLES if (t in STATIQUES) == ("statique" in a_lire)] if len(a_lire) == 1 else None
-            data = get_store().read_all(tables)
+            store = get_store()
+            try:
+                data = store.read_all(tables)
+            except TypeError:  # connexion créée par une version précédente du code
+                data = store.read_all()
             for g in a_lire:
                 m[g] = {t: df for t, df in data.items() if (t in STATIQUES) == (g == "statique")}
                 m["t_" + g] = maintenant
