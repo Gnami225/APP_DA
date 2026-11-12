@@ -114,11 +114,13 @@ class GoogleSheetStore:
                 header = header + missing
             self._headers[table] = header
 
-    def read_all(self) -> dict[str, pd.DataFrame]:
-        res = _retry(self.sh.values_batch_get, [self._rng(t) for t in TABLES],
+    def read_all(self, tables=None) -> dict[str, pd.DataFrame]:
+        """Lit les onglets demandés (tous par défaut) en UN seul appel Google."""
+        tables = [t for t in (tables or TABLES) if t in TABLES]
+        res = _retry(self.sh.values_batch_get, [self._rng(t) for t in tables],
                      params={"valueRenderOption": "UNFORMATTED_VALUE"})
         out = {}
-        for table, vr in zip(TABLES, res.get("valueRanges", [])):
+        for table, vr in zip(tables, res.get("valueRanges", [])):
             values = vr.get("values") or []
             if not values:
                 out[table] = _frame([], TABLES[table], table)
@@ -130,7 +132,7 @@ class GoogleSheetStore:
         return out
 
     def read(self, table: str) -> pd.DataFrame:
-        return self.read_all()[table]
+        return self.read_all([table])[table]  # un seul onglet (et non plus toute la base)
 
     def append(self, table: str, rows: list[dict]):
         if not rows:
@@ -242,8 +244,8 @@ class ExcelStore:
         body = [[("" if v is None else v) for v in r] for r in rows[1:]]
         return _frame(body, header, table)
 
-    def read_all(self) -> dict[str, pd.DataFrame]:
-        return {t: self.read(t) for t in TABLES}
+    def read_all(self, tables=None) -> dict[str, pd.DataFrame]:
+        return {t: self.read(t) for t in (tables or TABLES) if t in TABLES}
 
     def append(self, table: str, rows: list[dict]):
         from openpyxl import load_workbook
