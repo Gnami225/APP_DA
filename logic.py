@@ -56,8 +56,30 @@ def next_numero(da: pd.DataFrame, chantier: str, annee: int) -> str:
     return f"{prefix}{max(seqs) + 1:04d}"
 
 
-def build_da(store, entete: dict, lignes: list[dict], user: dict) -> tuple[dict, list[dict]]:
-    """Écrit une DA et ses lignes. Retourne (ligne DA, lignes articles) telles qu'archivées."""
+def lignes_da(da_row: dict, lignes: list[dict], premier: int = 1) -> list[dict]:
+    """Lignes articles d'une DA (à la création ou ajoutées lors d'une modification)."""
+    return [{
+        "ID_Ligne": uuid.uuid4().hex[:10],
+        "ID_DA": da_row["ID_DA"],
+        "N° Ligne": i,
+        "Code_Parc": l.get("Code_Parc", ""),
+        "Code Article": l.get("Code Article", ""),
+        "Désignation": l["Désignation"],
+        "Référence": l.get("Référence", ""),
+        "Colisage": l.get("Colisage", ""),
+        "Quantité": float(l["Quantité"]),
+        "Usage": l.get("Usage", ""),
+        "DA_Numero": da_row["N° DA"],
+        "DA_Date": as_text(da_row["Date DA"])[:10],
+        "DA_Chantier": da_row["Chantier"],
+        "DA_Service": da_row["Service Demandeur"],
+        "Statut ligne": "À commander",
+    } for i, l in enumerate(lignes, start=premier)]
+
+
+def build_da(store, entete: dict, lignes: list[dict], user: dict, extra: dict | None = None) -> tuple[dict, list[dict]]:
+    """Écrit une DA et ses lignes. Retourne (ligne DA, lignes articles) telles qu'archivées.
+    `extra` : champs de circuit (statut de départ, visa du responsable de service)."""
     da_df = store.read("DA")
     d_da = entete["Date DA"]
     numero = next_numero(da_df, entete["Chantier"], d_da.year)
@@ -84,25 +106,8 @@ def build_da(store, entete: dict, lignes: list[dict], user: dict) -> tuple[dict,
         "Motif rejet": "",
         "Créé le": now,
     }
-    rows = []
-    for i, l in enumerate(lignes, start=1):
-        rows.append({
-            "ID_Ligne": uuid.uuid4().hex[:10],
-            "ID_DA": id_da,
-            "N° Ligne": i,
-            "Code_Parc": l.get("Code_Parc", ""),
-            "Code Article": l.get("Code Article", ""),
-            "Désignation": l["Désignation"],
-            "Référence": l.get("Référence", ""),
-            "Colisage": l.get("Colisage", ""),
-            "Quantité": float(l["Quantité"]),
-            "Usage": l.get("Usage", ""),
-            "DA_Numero": numero,
-            "DA_Date": d_da.isoformat(),
-            "DA_Chantier": entete["Chantier"],
-            "DA_Service": entete["Service Demandeur"],
-            "Statut ligne": "À commander",
-        })
+    da_row.update(extra or {})
+    rows = lignes_da(da_row, lignes)
     # lignes d'abord : l'en-tête n'apparaît qu'une fois ses articles écrits
     store.append("HISTORIQUE_ARTICLES", rows)
     store.append("DA", [da_row])
