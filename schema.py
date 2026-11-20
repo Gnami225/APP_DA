@@ -4,7 +4,7 @@ DA_COLS = [
     "ID_DA", "N° DA", "Date DA", "Chantier", "Code DA", "Service Demandeur",
     "Demandeur", "Email Demandeur", "Responsable", "Priorité", "Date besoin",
     "Observations", "Signature Demandeur", "Statut", "Validé par",
-    "Date validation", "Motif rejet", "Créé le",
+    "Date validation", "Motif rejet", "Créé le", "Visa Resp. service", "Date visa Resp. service",
 ]
 
 LIGNE_COLS = [
@@ -31,14 +31,23 @@ TABLES = {
     "BC": ["ID_BC", "N° BC", "Date BC", "ID_DA", "N° DA", "Chantier", "Code Parc", "Magasin", "Fournisseur",
            "Condition règlement", "Total HT", "Taux TVA", "Montant TVA", "Total TTC", "Statut", "Acheteur",
            "Validé par", "Date validation", "Motif rejet", "ID_TCP", "N° TCP", "Observations", "Créé le",
-           "Statut livraison", "Date livraison"],
+           "Statut livraison", "Date livraison", "Modifié le", "Modifié par"],
     "BC_LIGNES": ["ID_LigneBC", "ID_BC", "N° BC", "N° Ligne", "ID_Ligne_DA", "Code Article", "Désignation",
                   "Référence", "Code_Parc", "Unité", "Quantité", "Prix unitaire HT", "Remise %", "Montant HT",
                   "Fournisseur", "Date BC", "Chantier", "N° DA", "TVA %", "Montant TVA",
-                  "Qté livrée", "Date livraison", "Statut livraison"],
+                  "Qté livrée", "Date livraison", "Statut livraison", "Prix réf. HT", "Écart prix %"],
     "LIVRAISONS": ["ID_Livraison", "ID_BC", "N° BC", "ID_LigneBC", "ID_Ligne_DA", "Désignation", "Référence",
                    "Unité", "Qté livrée", "Date livraison", "Observation", "Fournisseur", "Chantier", "Saisi par",
                    "Créé le"],
+    # articles saisis hors catalogue : à analyser puis intégrer (ou rattacher à un article existant)
+    "ARTICLES_A_CATALOGUER": ["ID_Proposition", "Date", "Désignation", "Référence", "Colisage", "Saisi par",
+                              "Service", "Chantier", "N° DA", "ID_DA", "ID_Ligne", "Statut", "Désignation retenue",
+                              "Référence retenue", "Famille", "Code attribué", "Traité par", "Date traitement",
+                              "Commentaire"],
+    "VALIDATIONS_DA": ["ID_Validation", "ID_DA", "N° DA", "Niveau", "Décision", "Par", "Rôle", "Date", "Commentaire"],
+    "PRIX_HISTORIQUE": ["Date", "N° BC", "Fournisseur", "Chantier", "Code Article", "Désignation", "Référence",
+                        "Famille", "Unité", "Quantité", "PU HT", "Remise %", "PU net HT", "Libellé d'origine",
+                        "Source"],
     "TCP": ["ID_TCP", "N° TCP", "Date TCP", "ID_DA", "N° DA", "Chantier", "Fournisseurs consultés",
             "Fournisseur retenu", "Montant retenu HT", "Moins-disant", "Montant moins-disant HT",
             "Motif choix", "Conditions offres", "Acheteur", "Statut", "N° BC", "Observations", "Créé le"],
@@ -51,15 +60,21 @@ PRIORITES = ["Normale", "Urgente", "Critique"]
 COLISAGES = ["Unité", "Paire", "Paquet", "Carton", "Boîte", "Sac", "Rouleau", "Barre", "Botte", "Pot", "Bidon", "Fût",
              "m", "ml", "m²", "m³", "kg", "Tonne", "L", "Voyage", "ha", "Jeu", "Lot", "Jour", "Forfait", "F CFA"]
 HORS_CATALOGUE = "HORS CATALOGUE"
-STATUTS = ["Émise", "Validée", "Rejetée"]
-ANCIENS_STATUTS = {"Soumise": "Émise"}  # DA créées avant le renommage
+# circuit DA : Émise -> Validée Resp. service -> Validée DG (part aux achats) ; Rejetée à tout niveau
+STATUTS = ["Émise", "Validée Resp. service", "Validée DG", "Rejetée"]
+DA_EN_ATTENTE = ["Émise", "Validée Resp. service"]
+ANCIENS_STATUTS = {"Soumise": "Émise", "Validée": "Validée DG"}  # DA créées avant le circuit à deux niveaux
 STATUTS_LIGNE = ["À commander", "Commandée partielle", "Commandée", "Livrée partielle", "Livrée", "Annulée"]
 ROLES_ADMIN = {"Admin"}
-ROLES = ["Demandeur", "Acheteur", "Direction", "Admin"]
+ROLES = ["Demandeur", "Chef de service", "Acheteur", "Direction", "Admin"]
+ROLES_VALID_DA = {"Chef de service", "Direction", "Admin"}  # onglet « Validation DA »
+ROLES_DG = {"Direction", "Admin"}                            # valident au niveau DG (et peuvent suppléer le chef)
 ROLES_ACHATS = {"Acheteur", "Admin"}          # voient l'onglet Achats (DA, TCP, BC, fournisseurs)
 ROLES_VALID_BC = {"Direction", "Admin"}       # valident les bons de commande
 
 STATUTS_BC = ["Émis", "Validé", "Rejeté", "Annulé"]
+STATUTS_CATALOGAGE = ["À analyser", "Intégré", "Rattaché", "Rejeté"]
+LIGNE_BC_RETIREE = "Retirée"  # ligne supprimée lors d'une modification du BC (gardée pour la trace)
 STATUTS_LIVRAISON = ["Non livré", "Partiel", "Livré"]
 STATUTS_TCP = ["Établi", "BC partiel", "BC émis", "Abandonné"]
 
@@ -74,6 +89,9 @@ PARAMETRES_DEFAUT = {  # valeurs initiales, modifiables dans Administration > Pa
     "Prochain N° BC": "5944",
     "Préfixe BC": "BC-",
     "Préfixe TCP": "TCP-",
+    "Seuil alerte prix (%)": "15",
+    "Familles sans alerte prix": "TRANSPORT & LOGISTIQUE; FRAIS ADMIN. VÉHICULES; RÉPARATIONS & ENTRETIEN ENGINS; "
+                                 "LOCATION ENGINS & MATÉRIEL",
 }
 CONDITIONS_DEFAUT = [
     "30 jours, date dépôt facture",
