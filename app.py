@@ -16,11 +16,14 @@ import pandas as pd
 import streamlit as st
 
 from acces import POSTES, Garde, creer_jeton, ligne_txt, lire_jeton, normalise, nouveau_code, trouve_poste
-from logic import as_text, build_da, decide, fmt_date, is_true, send_email, to_date
+from logic import as_text, build_da, lignes_da, fmt_date, fmt_montant, is_true, maintenant, nouvel_id, send_email, to_date
 from pdf import build_pdf, find_logo
 import achats
-from schema import (TABLES, ANCIENS_STATUTS, COLISAGES, PRIORITES, ROLES, ROLES_ACHATS, ROLES_ADMIN, ROLES_VALID_BC,
-                    STATUTS, STATUTS_LIGNE)
+import catalogage
+import graphs
+import prix
+from schema import (TABLES, ANCIENS_STATUTS, COLISAGES, DA_EN_ATTENTE, PRIORITES, ROLES, ROLES_ACHATS, ROLES_ADMIN,
+                    ROLES_DG, ROLES_VALID_BC, ROLES_VALID_DA, STATUTS, STATUTS_LIGNE, LIGNE_BC_RETIREE)
 from storage import ExcelStore, GoogleSheetStore
 
 APP_DIR = Path(__file__).resolve().parent
@@ -140,7 +143,7 @@ def _services_pwc() -> bool:
 # Onglets qui changent peu (gardés 15 min) et onglets de saisie (gardés 3 min). Les données restent en
 # mémoire du serveur sans copie (cache_resource) : chaque lecture est instantanée.
 STATIQUES = ["ARTICLES", "PARC", "CHANTIERS", "SERVICES", "UTILISATEURS", "PARAMETRES", "CONDITIONS_REGLEMENT",
-             "FOURNISSEURS"]
+             "FOURNISSEURS", "PRIX_HISTORIQUE"]
 TTL = {"statique": 900, "dynamique": 180}
 
 
@@ -186,6 +189,8 @@ def load(table: str) -> pd.DataFrame:
         df = df.copy()
         for c in manquantes:
             df[c] = ""
+    if table == "BC_LIGNES" and len(df):  # lignes retirées lors d'une modification de BC : gardées, non affichées
+        df = df.loc[df["Statut livraison"].map(as_text) != LIGNE_BC_RETIREE]
     if table == "DA" and len(df):
         df = df.copy()
         df["Statut"] = df["Statut"].map(lambda s: ANCIENS_STATUTS.get(as_text(s), as_text(s)))
@@ -226,7 +231,8 @@ def pdf_de(da: dict) -> bytes:
 
 
 def pdf_name(da: dict) -> str:
-    suffix = {"Validée": "_VALIDEE", "Rejetée": "_REJETEE"}.get(as_text(da.get("Statut")), "")
+    suffix = {"Validée DG": "_VALIDEE", "Validée Resp. service": "_VISA_SERVICE",
+              "Rejetée": "_REJETEE"}.get(as_text(da.get("Statut")), "")
     return f"{as_text(da.get('N° DA'))}{suffix}.pdf"
 
 
@@ -336,12 +342,82 @@ def login():
     st.stop()
 
 
+# --------------------------------------------------------------------------- circuit de validation des DA
+def _actif(v) -> bool:
+    return as_text(v) == "" or is_true(v)
+
+
+def chef_du_service(code_service: str) -> dict:
+    """Responsable (rôle « Chef de service ») d'un service : une seule personne par service."""
+    u = load("UTILISATEURS")
+    m = u.loc[(u["Rôle"].map(as_text) == "Chef de service") & (u["Service"].map(as_text) == as_text(code_service))
+              & u["Actif"].map(_actif).astype(bool)]
+    return m.iloc[0].to_dict() if len(m) else {}
+
+
+def niveau_depart(user: dict, service: str) -> dict:
+    """Champs de circuit d'une DA à sa soumission. La DA d'un responsable pour son service, de la direction
+    ou de l'admin passe directement au niveau DG."""
+    if user["Rôle"] in ROLES_DG or (user["Rôle"] == "Chef de service" and as_text(user.get("Service")) == service):
+        return {"Statut": "Validée Resp. service", "Visa Resp. service": user["Nom"],
+                "Date visa Resp. service": date.today().isoformat()}
+    return {"Statut": "Émise", "Visa Resp. service": "", "Date visa Resp. service": ""}
+
+
+def journaliser(entrees: list[dict]):
+    if entrees:
+        get_store().append("VALIDATIONS_DA", [{"ID_Validation": nouvel_id(10), "Date": maintenant(), **e}
+                                              for e in entrees])
+
+
+def _entree(d: dict, niveau: str, decision: str, user: dict, commentaire: str = "") -> dict:
+    return {"ID_DA": as_text(d["ID_DA"]), "N° DA": as_text(d["N° DA"]), "Niveau": niveau, "Décision": decision,
+            "Par": user["Nom"], "Rôle": user["Rôle"], "Commentaire": commentaire}
+
+
+def circuit(d: dict) -> str:
+    """Étapes du circuit : demandeur → responsable du service → DG."""
+    s, visa = as_text(d.get("Statut")), as_text(d.get("Visa Resp. service"))
+    e1 = f"✅ Émise le {fmt_date(d.get('Date DA'))}"
+    if visa:
+        e2 = f"✅ Resp. service : {visa} ({fmt_date(d.get('Date visa Resp. service'))})"
+    elif s == "Rejetée":
+        e2 = "❌ Rejetée par le responsable de service"
+    elif s == "Émise":
+        chef = chef_du_service(as_text(d.get("Service Demandeur"))).get("Nom")
+        e2 = f"⏳ Attente Resp. service{f' ({chef})' if chef else ''}"
+    else:
+        e2 = "✅ Resp. service"
+    if s == "Validée DG":
+        e3 = f"✅ DG : {as_text(d.get('Validé par'))} ({fmt_date(d.get('Date validation'))})"
+    elif s == "Rejetée" and visa:
+        e3 = "❌ Rejetée par la DG"
+    elif s == "Validée Resp. service":
+        e3 = "⏳ Attente DG"
+    else:
+        e3 = "DG"
+    return f"{e1}  →  {e2}  →  {e3}"
+
+
+def journal_de(id_da: str) -> pd.DataFrame:
+    j = load("VALIDATIONS_DA")
+    j = j.loc[j["ID_DA"].map(as_text) == as_text(id_da)].sort_values("Date")
+    return j[["Date", "Niveau", "Décision", "Par", "Commentaire"]]
+
+
+def emails_role(roles: set[str]) -> list[str]:
+    u = load("UTILISATEURS")
+    m = u.loc[u["Rôle"].map(as_text).isin(roles).astype(bool) & u["Actif"].map(_actif).astype(bool)]
+    return [as_text(e) for e in m["Email"] if "@" in as_text(e)]
+
+
 # --------------------------------------------------------------------------- vues communes
 def detail_da(da: dict, key: str):
     st.markdown(f"**{as_text(da['N° DA'])}** · {as_text(da['Statut'])} · "
                 f"{refs()['chantiers'].get(as_text(da['Chantier']), as_text(da['Chantier']))}")
     st.caption(f"{fmt_date(da['Date DA'])} · {as_text(da['Demandeur'])} · priorité {as_text(da['Priorité'])}"
                + (f" · besoin le {fmt_date(da['Date besoin'])}" if as_text(da["Date besoin"]) else ""))
+    st.caption(circuit(da))
     lg = pd.DataFrame(lignes_de(da["ID_DA"]))
     if len(lg):
         lg = lg.sort_values("N° Ligne")[["N° Ligne", "Désignation", "Référence", "Code_Parc",
@@ -350,8 +426,12 @@ def detail_da(da: dict, key: str):
         lg["Qté livrée"] = lg["Qté livrée"].map(lambda x: f"{float(x):g}" if as_text(x) not in ("", "nan") else "")
         lg["Date livraison"] = lg["Date livraison"].map(fmt_date)
         st.dataframe(lg, hide_index=True, width="stretch")
-    if as_text(da.get("Motif rejet")):
+    if as_text(da.get("Motif rejet")) and as_text(da.get("Statut")) == "Rejetée":
         st.warning(f"Motif du rejet : {as_text(da['Motif rejet'])}")
+    j = journal_de(da["ID_DA"])
+    if len(j):
+        with st.expander(f"Historique des validations ({len(j)})"):
+            st.dataframe(j.assign(Date=j["Date"].map(lambda v: as_text(v)[:16])), hide_index=True, width="stretch")
     st.download_button("Télécharger / imprimer la fiche PDF", pdf_de(da), file_name=pdf_name(da),
                        mime="application/pdf", key=f"pdf-{key}", type="primary")
 
@@ -490,7 +570,7 @@ def onglet_nouvelle(user: dict):
         st.session_state.lignes = []
     last = st.session_state.get("last_submit")
     if last:
-        st.success(f"DA **{last['numero']}** enregistrée et transmise pour validation.")
+        st.success(f"DA **{last['numero']}** enregistrée et {last.get('suite', 'transmise pour validation')}.")
         st.download_button("Télécharger / imprimer la fiche PDF", last["pdf"], file_name=f"{last['numero']}.pdf",
                            mime="application/pdf", type="primary", key="pdf-last")
         if last.get("mail"):
@@ -518,7 +598,8 @@ def onglet_nouvelle(user: dict):
     c1, c2 = st.columns(2)
     service = c1.selectbox("Service demandeur", codes_sv, format_func=lambda c: r["services"].get(c, c),
                            index=codes_sv.index(user["Service"]) if user["Service"] in codes_sv else 0)
-    resp_defaut = as_text(sv.loc[sv["Code Service"].map(as_text) == service].iloc[0]["Responsable"])
+    resp_defaut = (as_text(chef_du_service(service).get("Nom"))
+                   or as_text(sv.loc[sv["Code Service"].map(as_text) == service].iloc[0]["Responsable"]))
     responsable = c2.text_input("Responsable du service", value=resp_defaut, key=f"resp-{service}")
     c1, c2 = st.columns(2)
     demandeur = c1.text_input("Demandeur", value=user["Nom"])
@@ -573,16 +654,28 @@ def onglet_nouvelle(user: dict):
                   "Service Demandeur": service, "Demandeur": demandeur.strip(),
                   "Responsable": responsable.strip(), "Priorité": priorite,
                   "Date besoin": date_besoin, "Observations": observations.strip()}
+        depart = niveau_depart(user, service)
         with st.spinner("Enregistrement…"):
-            da_row, rows = build_da(get_store(), entete, st.session_state.lignes, user)
+            da_row, rows = build_da(get_store(), entete, st.session_state.lignes, user, depart)
+            j = [_entree(da_row, "Demandeur", "Émise", user)]
+            if depart["Statut"] != "Émise":
+                j.append(_entree(da_row, "Resp. service", "Visa automatique (DA du responsable / de la direction)",
+                                 user))
+            journaliser(j)
+            catalogage.enregistrer(contexte(user), da_row, rows, user)
             refresh(statique=False)
             pdf = build_pdf(da_row, rows, r)
+        chef = chef_du_service(service)
+        suite = ("transmise à la Direction générale pour validation" if depart["Statut"] != "Émise" else
+                 f"transmise à {chef['Nom']} (responsable du service) pour validation" if chef else
+                 "transmise pour validation (aucun responsable de service désigné : la DG valide directement)")
         mail = ""
         smtp = _secret("smtp")
         if smtp:
-            dest = [as_text(ch[ch["Code Chantier"].map(as_text) == chantier].iloc[0]["Email validateur"]),
-                    as_text(sv[sv["Code Service"].map(as_text) == service].iloc[0]["Email responsable"]),
-                    user.get("Email", "")]
+            dest = ([as_text(chef.get("Email"))] if depart["Statut"] == "Émise" and chef else
+                    emails_role(ROLES_DG) if depart["Statut"] != "Émise" else
+                    [as_text(sv[sv["Code Service"].map(as_text) == service].iloc[0]["Email responsable"])])
+            dest += [user.get("Email", "")]
             try:
                 if send_email(smtp, dest, f"DA {da_row['N° DA']} – {r['chantiers'].get(chantier, chantier)} – à valider",
                               f"Nouvelle demande d'achat {da_row['N° DA']} de {demandeur} ({n} articles, "
@@ -591,18 +684,158 @@ def onglet_nouvelle(user: dict):
             except Exception as exc:  # l'envoi ne doit jamais bloquer la DA
                 mail = f"DA enregistrée, mais l'email n'a pas pu partir ({exc})."
         st.session_state.lignes = []
-        st.session_state.last_submit = {"numero": da_row["N° DA"], "pdf": pdf, "mail": mail}
+        st.session_state.last_submit = {"numero": da_row["N° DA"], "pdf": pdf, "mail": mail, "suite": suite}
         st.rerun()
 
 
 def onglet_mes_da(user: dict):
+    if st.session_state.get("mes_msg"):
+        st.success(st.session_state.pop("mes_msg"))
     da = load("DA")
     mine = da[(da["Email Demandeur"].map(as_text) == user["Email"]) & (user["Email"] != "")
               | (da["Demandeur"].map(as_text) == user["Nom"])]
+    rejetees = mine.loc[mine["Statut"] == "Rejetée"]
+    if len(rejetees):
+        st.warning(f"{len(rejetees)} DA rejetée(s) à corriger : {', '.join(rejetees['N° DA'].map(as_text))}. "
+                   "Choisissez-la ci-dessous, corrigez puis renvoyez-la.")
     tableau_da(mine)
+    st.caption("Une DA reste modifiable tant qu'elle n'est pas validée par la Direction générale.")
     d = choisir_da(mine, "mes")
     if d:
         detail_da(d, "mes")
+        if as_text(d["Statut"]) in MODIFIABLES:
+            modifier_da(d, user)
+
+
+MODIFIABLES = ("Émise", "Validée Resp. service", "Rejetée")  # la DA n'est pas encore validée par la DG
+
+
+def modifier_da(d: dict, user: dict, admin: bool = False):
+    """Le demandeur modifie sa DA tant que la DG ne l'a pas validée : quantités, colisages, codes parc, usages,
+    articles retirés ou ajoutés, en-tête. Une DA déjà visée repart chez le responsable de service.
+    admin=True : l'administrateur modifie n'importe quelle DA, son statut ne change pas."""
+    id_da, statut = as_text(d["ID_DA"]), as_text(d["Statut"])
+    rejet = statut == "Rejetée" and not admin
+    titre = ("✏️ Modifier la DA (admin)" if admin else
+             "✏️ Corriger et renvoyer la DA" if rejet else "✏️ Modifier la DA")
+    with st.expander(titre, expanded=rejet):
+        if admin:
+            st.caption("Modification administrateur : le statut et les visas de la DA ne changent pas. Les articles "
+                       "déjà commandés (BC) ne peuvent pas être retirés.")
+        elif statut == "Validée Resp. service" and not (user["Rôle"] in ROLES_DG or (
+                user["Rôle"] == "Chef de service" and as_text(user.get("Service")) == as_text(d["Service Demandeur"]))):
+            st.warning("Cette DA a déjà le visa du responsable de service : après modification, elle repart chez lui "
+                       "pour un nouveau visa.")
+        c1, c2 = st.columns(2)
+        prio = c1.selectbox("Priorité", PRIORITES, key=f"mod-prio-{id_da}",
+                            index=PRIORITES.index(as_text(d["Priorité"])) if as_text(d["Priorité"]) in PRIORITES else 0)
+        besoin = c2.date_input("Date de besoin", value=to_date(d.get("Date besoin")), format="DD/MM/YYYY",
+                               key=f"mod-bes-{id_da}")
+        lg = pd.DataFrame(lignes_de(id_da))
+        lg = lg.loc[lg["Statut ligne"].map(as_text) != "Annulée"].sort_values("N° Ligne")
+        cols = ["ID_Ligne", "N° Ligne", "Désignation", "Référence", "Code_Parc", "Colisage", "Quantité", "Usage"]
+        v = lg[cols].copy()
+        for c in cols:
+            v[c] = v[c].map(as_text) if c != "Quantité" else v[c].map(lambda x: float(_num(x) or 0))
+        st.caption("Modifiez directement le tableau. Pour retirer un article : cochez la ligne puis 🗑 (ou quantité 0).")
+        ed = st.data_editor(v, hide_index=True, width="stretch", key=f"mod-ed-{id_da}", num_rows="delete",
+                            disabled=["N° Ligne", "Désignation", "Référence"],
+                            column_config={"ID_Ligne": None,
+                                           "Colisage": st.column_config.SelectboxColumn(
+                                               options=sorted(set(COLISAGES) | set(v["Colisage"]) - {""})),
+                                           "Quantité": st.column_config.NumberColumn(min_value=0.0, format="%.2f")})
+
+        # ---- articles ajoutés (catalogue ou saisie libre)
+        cle_aj = f"mod-aj-{id_da}"
+        st.session_state.setdefault(cle_aj, [])
+        st.markdown("###### Ajouter un article")
+        des, ref, code, col_def, cles = choisir_article(f"modart-{id_da}")
+        with st.form(f"mod-form-{id_da}-{des or ''}-{ref}", clear_on_submit=True):
+            a1, a2, a3, a4 = st.columns(4)
+            colis = a1.selectbox("Colisage", COLISAGES, index=COLISAGES.index(col_def) if col_def in COLISAGES else 0)
+            qte = a2.number_input("Quantité", min_value=0.0, step=1.0, value=1.0)
+            parc = a3.text_input("Code parc", placeholder="Facultatif")
+            usage = a4.text_input("Usage")
+            if st.form_submit_button("Ajouter à la DA"):
+                if not des or qte <= 0 or not usage.strip():
+                    st.error("Désignation, quantité et usage sont obligatoires.")
+                else:
+                    st.session_state[cle_aj].append({"Code Article": code or "", "Désignation": des, "Référence": ref,
+                                                     "Code_Parc": parc.strip().upper(), "Colisage": colis,
+                                                     "Quantité": qte, "Usage": usage.strip()})
+                    for c in cles:
+                        st.session_state.pop(c, None)
+                    st.rerun()
+        for i, l in enumerate(st.session_state[cle_aj]):
+            a, b = st.columns([6, 1])
+            a.write(f"➕ {l['Désignation']} {l['Référence']} — {l['Quantité']:g} {l['Colisage']} · {l['Usage']}")
+            if b.button("✕", key=f"mod-del-{id_da}-{i}"):
+                st.session_state[cle_aj].pop(i)
+                st.rerun()
+
+        obs = st.text_area("Observations" + (" (réponse au motif du rejet)" if rejet else ""),
+                           value=as_text(d.get("Observations")), key=f"mod-obs-{id_da}", height=68)
+        libelle = "Renvoyer la DA corrigée" if rejet else "Enregistrer les modifications de la DA"
+        if not st.button(libelle, type="primary", key=f"mod-go-{id_da}"):
+            return
+        ajouts = st.session_state[cle_aj]
+        gardees = ed.loc[ed["Quantité"].map(lambda x: float(x or 0)) > 0]
+        if not len(gardees) and not ajouts:
+            st.error("Il faut au moins un article avec une quantité.")
+            return
+        store = get_store()
+        frais = store.read("DA")  # lecture directe : la DG a peut-être validé entre-temps
+        frais = frais.loc[frais["ID_DA"].map(as_text) == id_da]
+        if not admin and len(frais) and ANCIENS_STATUTS.get(as_text(frais.iloc[0]["Statut"]),
+                                              as_text(frais.iloc[0]["Statut"])) not in MODIFIABLES:
+            st.error("Cette DA vient d'être validée par la Direction générale : elle n'est plus modifiable.")
+            refresh(statique=False)
+            return
+        avant = v.set_index("ID_Ligne")
+        apres = ed.dropna(subset=["ID_Ligne"]).set_index("ID_Ligne")
+        bc_de = dict(zip(lg["ID_Ligne"].map(as_text), lg["N° BC"].map(as_text)))
+        retire_cmd = [as_text(avant.at[i, "Désignation"]) for i in avant.index if bc_de.get(i) and (
+            i not in apres.index or float(apres.at[i, "Quantité"] or 0) <= 0)]
+        if retire_cmd:
+            st.error("Article déjà commandé, impossible de le retirer (annulez d'abord le BC) : "
+                     + ", ".join(retire_cmd))
+            return
+        changes = {}
+        for idl in avant.index:
+            if idl not in apres.index:  # ligne supprimée
+                changes[idl] = {"Statut ligne": "Annulée"}
+                continue
+            diff = {c: as_text(apres.at[idl, c]) for c in ("Code_Parc", "Colisage", "Usage")
+                    if as_text(apres.at[idl, c]) != as_text(avant.at[idl, c])}
+            q = float(apres.at[idl, "Quantité"] or 0)
+            if q != float(avant.at[idl, "Quantité"] or 0):
+                diff["Quantité"] = q
+            if q <= 0:
+                diff["Statut ligne"] = "Annulée"
+            if diff:
+                changes[idl] = diff
+        depart = {} if admin else niveau_depart(user, as_text(d["Service Demandeur"]))
+        if changes:
+            store.update_many("HISTORIQUE_ARTICLES", "ID_Ligne", changes)
+        nouvelles = []
+        if ajouts:
+            premier = int(max([_num(x) or 0 for x in lg["N° Ligne"]] or [0])) + 1
+            nouvelles = lignes_da(d, ajouts, premier)
+            store.append("HISTORIQUE_ARTICLES", nouvelles)
+            catalogage.enregistrer(contexte(user), d, nouvelles, user)
+        circuit_maj = {} if admin else {**depart, "Motif rejet": "", "Validé par": "", "Date validation": ""}
+        store.update("DA", "ID_DA", id_da, {**circuit_maj, "Observations": obs.strip(), "Priorité": prio,
+                                            "Date besoin": besoin.isoformat() if besoin else ""})
+        journaliser([_entree(d, "Admin" if admin else "Demandeur",
+                             "Renvoyée après correction" if rejet else "Modifiée", user,
+                             f"{len(changes)} ligne(s) modifiée(s), {len(nouvelles)} ajoutée(s)")])
+        st.session_state.pop(cle_aj, None)
+        refresh(statique=False)
+        st.session_state["adm_msg" if admin else "mes_msg"] = (
+            f"DA {as_text(d['N° DA'])} " + ("corrigée et renvoyée pour validation." if rejet else "modifiée.")
+            + (" Elle repart chez le responsable de service pour visa."
+               if not admin and statut != "Émise" and depart["Statut"] == "Émise" else ""))
+        st.rerun()
 
 
 def _notifier(d: dict, statut: str):
@@ -628,14 +861,217 @@ def _num(v):
         return as_text(v)
 
 
+# --------------------------------------------------------------------------- validation hiérarchique des DA
+def da_a_valider(user: dict, avec_emises: bool = False) -> pd.DataFrame:
+    """Chef de service : DA émises de son service. DG / admin : DA visées par le responsable de service
+    (et, sur demande, celles encore en attente du responsable, pour le suppléer)."""
+    da = load("DA")
+    if user["Rôle"] in ROLES_DG:
+        return da.loc[da["Statut"].isin(DA_EN_ATTENTE if avec_emises else ["Validée Resp. service"])]
+    if user["Rôle"] == "Chef de service":
+        return da.loc[(da["Statut"] == "Émise") & (da["Service Demandeur"].map(as_text) == as_text(user.get("Service")))]
+    return da.iloc[0:0]
+
+
+def decider_da(user: dict, ids: list[str], valider: bool, motif: str = "") -> tuple[list[str], list[str]]:
+    """Valide (niveau suivant) ou rejette des DA. Retourne (N° traités, N° ignorés)."""
+    da = load("DA")
+    da = da.set_index(da["ID_DA"].map(as_text))
+    dg, auj = user["Rôle"] in ROLES_DG, date.today().isoformat()
+    changes, entrees, faits, ignores, vers_dg, finales = {}, [], [], [], [], []
+    for i in ids:
+        if i not in da.index:
+            continue
+        d = da.loc[i].to_dict()
+        s, num = as_text(d["Statut"]), as_text(d["N° DA"])
+        ok = (s == "Validée Resp. service" and dg) or (s == "Émise" and (dg or (
+            user["Rôle"] == "Chef de service" and as_text(d["Service Demandeur"]) == as_text(user.get("Service")))))
+        if not ok:
+            ignores.append(num)
+            continue
+        niveau = "DG" if dg else "Resp. service"
+        if not valider:
+            changes[i] = {"Statut": "Rejetée", "Motif rejet": f"{motif} — {user['Nom']} ({niveau})"}
+            entrees.append(_entree(d, niveau, "Rejetée", user, motif))
+            finales.append((i, "Rejetée"))
+        elif dg:
+            ch = {"Statut": "Validée DG", "Validé par": user["Nom"], "Date validation": auj, "Motif rejet": ""}
+            if s == "Émise":  # la DG supplée le responsable de service
+                ch.update({"Visa Resp. service": f"{user['Nom']} (suppléance)", "Date visa Resp. service": auj})
+            changes[i] = ch
+            entrees.append(_entree(d, "DG", "Validée" + (" (niveau service suppléé)" if s == "Émise" else ""), user))
+            finales.append((i, "Validée DG"))
+        else:
+            changes[i] = {"Statut": "Validée Resp. service", "Visa Resp. service": user["Nom"],
+                          "Date visa Resp. service": auj, "Motif rejet": ""}
+            entrees.append(_entree(d, "Resp. service", "Validée", user))
+            vers_dg.append(num)
+        faits.append(num)
+    if changes:
+        get_store().update_many("DA", "ID_DA", changes)
+        journaliser(entrees)
+        refresh(statique=False)
+        for i, statut in finales:
+            _notifier({"ID_DA": i, "Email Demandeur": "x"}, statut)
+        smtp = _secret("smtp")
+        if smtp and vers_dg:
+            try:
+                send_email(smtp, emails_role(ROLES_DG), f"{len(vers_dg)} DA à valider (DG)",
+                           f"Visées par {user['Nom']} (responsable de service) : {', '.join(vers_dg)}.")
+            except Exception:
+                pass
+    return faits, ignores
+
+
+def _lignes_prix(d: dict) -> tuple[pd.DataFrame, float, int]:
+    ctx = contexte({})
+    lg = [l for l in lignes_de(d["ID_DA"]) if as_text(l.get("Statut ligne")) != "Annulée"]
+    rows, tot, n = [], 0.0, 0
+    for l in sorted(lg, key=lambda x: _num(x.get("N° Ligne")) or 0):
+        s = prix.ref_article(ctx, l.get("Code Article"), l.get("Désignation"), l.get("Référence"), l.get("Colisage"))
+        q = float(_num(l.get("Quantité")) or 0)
+        est = q * s["moyenne"] if s and not s.get("autre_unite") else None
+        if est is not None:
+            tot, n = tot + est, n + 1
+        rows.append({"Désignation": as_text(l["Désignation"]), "Référence": as_text(l.get("Référence")),
+                     "Qté": q, "Colisage": as_text(l.get("Colisage")), "Usage": as_text(l.get("Usage")),
+                     **prix.colonnes_ref(s), "Montant estimé": fmt_montant(est) if est is not None else ""})
+    return pd.DataFrame(rows), tot, n
+
+
+def estimation_da(id_da: str) -> str:
+    _, tot, n = _lignes_prix({"ID_DA": id_da})
+    return fmt_montant(tot) if n else ""
+
+
+def onglet_validation_da(user: dict):
+    dg = user["Rôle"] in ROLES_DG
+    if st.session_state.get("vda_msg"):
+        st.success(st.session_state.pop("vda_msg"))
+    if user["Rôle"] == "Chef de service" and not as_text(user.get("Service")):
+        st.warning("Votre service n'est pas renseigné : demandez à l'administrateur de compléter votre poste.")
+        return
+    avec_emises = False
+    if dg:
+        st.caption("DA visées par le responsable de leur service, à valider par la Direction générale. "
+                   "Une DA validée part aux achats.")
+        avec_emises = st.toggle("Afficher aussi les DA en attente du responsable de service (pour le suppléer)",
+                                key="vda-emises")
+    else:
+        st.caption(f"DA du service {refs()['services'].get(user.get('Service'), user.get('Service'))} à viser. "
+                   "Une fois visée, la DA passe à la Direction générale.")
+    f = da_a_valider(user, avec_emises).sort_values("Créé le")
+    k1, k2 = st.columns(2)
+    k1.metric("DA à valider", len(f))
+    k2.metric("Dont urgentes / critiques", int(f["Priorité"].isin(["Urgente", "Critique"]).sum()))
+    if not len(f):
+        st.info("Aucune DA en attente de votre validation.")
+        return
+    r = refs()
+    lg = load("HISTORIQUE_ARTICLES")
+    nb = lg.loc[lg["Statut ligne"].map(as_text) != "Annulée"].groupby(lg["ID_DA"].map(as_text)).size()
+    v = pd.DataFrame({
+        "ID_DA": f["ID_DA"].map(as_text), "N° DA": f["N° DA"].map(as_text), "Date": f["Date DA"].map(fmt_date),
+        "Chantier": f["Chantier"].map(lambda c: r["chantiers"].get(as_text(c), as_text(c))),
+        "Service": f["Service Demandeur"].map(lambda c: r["services"].get(as_text(c), as_text(c))),
+        "Demandeur": f["Demandeur"].map(as_text), "Priorité": f["Priorité"].map(as_text),
+        "Besoin le": f["Date besoin"].map(fmt_date),
+        "Articles": f["ID_DA"].map(lambda i: int(nb.get(as_text(i), 0))),
+        "Montant estimé (F)": f["ID_DA"].map(estimation_da),
+        "Étape": f["Statut"].map(lambda s: "Attente DG" if s == "Validée Resp. service" else "Attente Resp. service"),
+        "Visa service": f["Visa Resp. service"].map(as_text)})
+    version = st.session_state.get("vda_v", 0)
+    tout = st.checkbox("Tout cocher", key=f"vda-tout-{version}")
+    v.insert(0, "✓", tout)
+    ed = st.data_editor(v, hide_index=True, width="stretch", key=f"vda-ed-{version}-{tout}",
+                        disabled=[c for c in v.columns if c != "✓"],
+                        column_config={"ID_DA": None, "✓": st.column_config.CheckboxColumn("✓", width="small")})
+    coches = ed.loc[ed["✓"].astype(bool)]
+    n = len(coches)
+    b1, b2, b3 = st.columns([1, 1, 2])
+    motif = b3.text_input("Motif", key=f"vda-motif-{version}", label_visibility="collapsed",
+                          placeholder="Motif du rejet (obligatoire pour rejeter)")
+    go = None
+    if b1.button(f"✅ Valider ({n})", disabled=n == 0, type="primary", width="stretch", key="vda-ok"):
+        go = True
+    if b2.button(f"❌ Rejeter ({n})", disabled=n == 0, width="stretch", key="vda-ko"):
+        go = False
+    if go is False and not motif.strip():
+        st.error("Indiquez le motif du rejet avant de cliquer sur Rejeter.")
+        go = None
+    if go is not None:
+        faits, ignores = decider_da(user, coches["ID_DA"].tolist(), go, motif.strip())
+        st.session_state.vda_v = version + 1
+        st.session_state.vda_msg = (f"{len(faits)} DA {'validée(s)' if go else 'rejetée(s)'} : {', '.join(faits)}."
+                                    + (f" Ignorées (déjà traitées) : {', '.join(ignores)}." if ignores else ""))
+        st.rerun()
+
+    st.markdown("##### Examiner une DA")
+    lab = dict(zip(v["ID_DA"], v["N° DA"] + " · " + v["Demandeur"] + " · " + v["Étape"]))
+    id_da = st.selectbox("DA", list(lab), format_func=lab.get, index=None, key=f"vda-sel-{version}",
+                         placeholder="Choisir une DA pour voir ses articles et leurs prix passés")
+    if not id_da:
+        return
+    d = f.loc[f["ID_DA"].map(as_text) == id_da].iloc[0].to_dict()
+    st.caption(circuit(d))
+    if as_text(d.get("Observations")):
+        st.caption(f"Observations : {as_text(d['Observations'])}")
+    t, tot, nl = _lignes_prix(d)
+    st.dataframe(t, hide_index=True, width="stretch")
+    st.metric("Montant estimé de la DA (prix moyens)", f"{fmt_montant(tot)} F" if nl else "–",
+              help=f"{nl}/{len(t)} article(s) avec un prix de référence ; les autres ne sont pas estimés.")
+    c1, c2, c3 = st.columns([1, 1, 2])
+    m1 = c3.text_input("Motif", key=f"vda-m1-{id_da}", label_visibility="collapsed",
+                       placeholder="Motif du rejet (obligatoire pour rejeter)")
+    un = None
+    if c1.button("✅ Valider cette DA", type="primary", width="stretch", key=f"vda-ok1-{id_da}"):
+        un = True
+    if c2.button("❌ Rejeter cette DA", width="stretch", key=f"vda-ko1-{id_da}"):
+        un = False
+    if un is False and not m1.strip():
+        st.error("Indiquez le motif du rejet.")
+        un = None
+    if un is not None:
+        faits, _ = decider_da(user, [id_da], un, m1.strip())
+        st.session_state.vda_v = version + 1
+        st.session_state.vda_msg = f"DA {', '.join(faits) or '—'} {'validée' if un else 'rejetée'}."
+        st.rerun()
+    st.download_button("Télécharger la fiche PDF", pdf_de(d), file_name=pdf_name(d), mime="application/pdf",
+                       key=f"vda-pdf-{id_da}")
+
+
+def nb_a_valider(user: dict) -> int:
+    return len(da_a_valider(user))
+
+
+def _champs_statut(da: pd.DataFrame, id_da: str, statut: str, user: dict, motif: str = "") -> dict:
+    """Champs à écrire quand l'admin force un statut (tableau de l'Administration)."""
+    d = da.loc[da["ID_DA"] == id_da].iloc[0]
+    auj = date.today().isoformat()
+    visa = as_text(d.get("Visa Resp. service"))
+    if statut == "Émise":
+        return {"Statut": "Émise", "Visa Resp. service": "", "Date visa Resp. service": "", "Validé par": "",
+                "Date validation": "", "Motif rejet": ""}
+    if statut == "Validée Resp. service":
+        return {"Statut": statut, "Visa Resp. service": visa or f"{user['Nom']} (suppléance)",
+                "Date visa Resp. service": as_text(d.get("Date visa Resp. service")) or auj,
+                "Validé par": "", "Date validation": "", "Motif rejet": ""}
+    if statut == "Validée DG":
+        return {"Statut": statut, "Visa Resp. service": visa or f"{user['Nom']} (suppléance)",
+                "Date visa Resp. service": as_text(d.get("Date visa Resp. service")) or auj,
+                "Validé par": user["Nom"], "Date validation": auj, "Motif rejet": ""}
+    return {"Statut": "Rejetée", "Motif rejet": f"{motif} — {user['Nom']} (admin)" if motif else ""}
+
+
 def onglet_admin_da(user: dict):
     da = load("DA")
     if not len(da):
         st.info("Aucune DA pour le moment.")
         return
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Émises", int((da["Statut"] == "Émise").sum()))
-    k2.metric("Validées", int((da["Statut"] == "Validée").sum()))
+    k0, k1, k2, k3 = st.columns(4)
+    k0.metric("Attente Resp. service", int((da["Statut"] == "Émise").sum()))
+    k1.metric("Attente DG", int((da["Statut"] == "Validée Resp. service").sum()))
+    k2.metric("Validées DG", int((da["Statut"] == "Validée DG").sum()))
     k3.metric("Rejetées", int((da["Statut"] == "Rejetée").sum()))
     r = refs()
     c1, c2, c3 = st.columns([2, 2, 2])
@@ -658,7 +1094,7 @@ def onglet_admin_da(user: dict):
     st.caption("Cochez une ou plusieurs DA puis cliquez sur Valider ou Rejeter. "
                "Vous pouvez aussi modifier directement le tableau (statut, priorité…) puis enregistrer.")
     cols = ["ID_DA", "N° DA", "Date DA", "Chantier", "Demandeur", "Statut", "Priorité",
-            "Responsable", "Code DA", "Motif rejet", "Validé par", "Date validation"]
+            "Responsable", "Code DA", "Motif rejet", "Visa Resp. service", "Validé par", "Date validation"]
     vue = f[cols].copy()
     vue["Date DA"] = vue["Date DA"].map(fmt_date)
     vue["Date validation"] = vue["Date validation"].map(fmt_date)
@@ -668,12 +1104,12 @@ def onglet_admin_da(user: dict):
     version = st.session_state.get("adm_v", 0)
     t1, t2 = st.columns([1, 3])
     tout = t1.checkbox("Tout cocher", key=f"adm-tout-{version}")
-    if t2.toggle("Seulement les DA à traiter (Émises)", key="adm-emises"):
-        vue = vue.loc[vue["Statut"] == "Émise"]
+    if t2.toggle("Seulement les DA en attente de validation", key="adm-emises"):
+        vue = vue.loc[vue["Statut"].isin(DA_EN_ATTENTE)]
     vue.insert(0, "✓", tout)
     ed = st.data_editor(
         vue, hide_index=True, width="stretch", key=f"adm-da-{version}-{tout}",
-        disabled=["N° DA", "Date DA", "Chantier", "Demandeur", "Validé par", "Date validation"],
+        disabled=["N° DA", "Date DA", "Chantier", "Demandeur", "Visa Resp. service", "Validé par", "Date validation"],
         column_config={
             "✓": st.column_config.CheckboxColumn("✓", width="small", help="Cocher pour valider / rejeter en un clic"),
             "ID_DA": None,
@@ -687,8 +1123,8 @@ def onglet_admin_da(user: dict):
     motif = b4.text_input("Motif (obligatoire pour rejeter)", key=f"adm-motif-{version}",
                           label_visibility="collapsed", placeholder="Motif du rejet (obligatoire pour rejeter)")
     action = None
-    if b1.button(f"✅ Valider ({n})", disabled=n == 0, type="primary", width="stretch", key="adm-ok"):
-        action = "Validée"
+    if b1.button(f"✅ Valider DG ({n})", disabled=n == 0, type="primary", width="stretch", key="adm-ok"):
+        action = "Validée DG"
     if b2.button(f"❌ Rejeter ({n})", disabled=n == 0, width="stretch", key="adm-ko"):
         action = "Rejetée"
     if b3.button(f"↩ Remettre en Émise ({n})", disabled=n == 0, width="stretch", key="adm-re"):
@@ -699,13 +1135,10 @@ def onglet_admin_da(user: dict):
     if action:
         changes = {}
         for id_da in coches["ID_DA"]:
-            if action == "Émise":
-                changes[id_da] = {"Statut": "Émise", "Validé par": "", "Date validation": "", "Motif rejet": ""}
-            else:
-                changes[id_da] = {"Statut": action, "Validé par": user["Nom"],
-                                  "Date validation": date.today().isoformat(),
-                                  "Motif rejet": motif.strip() if action == "Rejetée" else ""}
+            changes[id_da] = _champs_statut(da, id_da, action, user, motif.strip())
         get_store().update_many("DA", "ID_DA", changes)
+        journaliser([_entree(da.loc[da["ID_DA"] == i].iloc[0].to_dict(), "Admin", action, user, motif.strip())
+                     for i in changes])
         refresh(statique=False)
         if action != "Émise":
             for id_da in changes:
@@ -723,13 +1156,11 @@ def onglet_admin_da(user: dict):
             if not diff:
                 continue
             if "Statut" in diff:
-                if diff["Statut"] in ("Validée", "Rejetée"):
-                    diff["Validé par"] = user["Nom"]
-                    diff["Date validation"] = date.today().isoformat()
+                diff.update({k: v for k, v in _champs_statut(da, id_da, diff["Statut"], user,
+                                                             diff.get("Motif rejet", "")).items()
+                             if k != "Motif rejet" or diff["Statut"] != "Rejetée"})
+                if diff["Statut"] in ("Validée DG", "Rejetée"):
                     notifs.append((id_da, diff["Statut"]))
-                else:
-                    diff["Validé par"] = ""
-                    diff["Date validation"] = ""
             if as_text(apres.at[id_da, "Statut"]) == "Rejetée" and not as_text(apres.at[id_da, "Motif rejet"]):
                 sans_motif.append(as_text(apres.at[id_da, "N° DA"]))
             changes[id_da] = diff
@@ -737,6 +1168,8 @@ def onglet_admin_da(user: dict):
             st.info("Aucune modification à enregistrer.")
         else:
             get_store().update_many("DA", "ID_DA", changes)
+            journaliser([_entree(da.loc[da["ID_DA"] == i].iloc[0].to_dict(), "Admin", c["Statut"], user)
+                         for i, c in changes.items() if "Statut" in c])
             refresh(statique=False)
             for id_da, statut in notifs:
                 _notifier({"ID_DA": id_da, "Email Demandeur": "x"}, statut)
@@ -752,6 +1185,7 @@ def onglet_admin_da(user: dict):
     if not d:
         return
     detail_da(d, "adm")
+    modifier_da(d, user, admin=True)
     lg = pd.DataFrame(lignes_de(d["ID_DA"]))
     if not len(lg):
         return
@@ -760,7 +1194,7 @@ def onglet_admin_da(user: dict):
     lv = lg[lcols].sort_values("N° Ligne").copy()
     for c in lcols:
         lv[c] = lv[c].map(as_text)
-    with st.expander("Modifier les lignes et le suivi achats"):
+    with st.expander("Suivi achats des lignes (avancé : fournisseur, BC, livraison)"):
         led = st.data_editor(
             lv, hide_index=True, width="stretch", key=f"adm-lg-{d['ID_DA']}-{version}",
             disabled=["N° Ligne"],
@@ -790,9 +1224,12 @@ def onglet_admin_da(user: dict):
 
 
 def onglet_admin(user: dict):
-    t1, t2, t3, t4 = st.tabs(["Demandes d'achat", "Utilisateurs & accès", "Paramètres", "Archivage"])
+    t1, t5, t2, t3, t4 = st.tabs(["Demandes d'achat", "Articles à cataloguer", "Utilisateurs & accès", "Paramètres",
+                                  "Archivage"])
     with t1:
         onglet_admin_da(user)
+    with t5:
+        catalogage.onglet_a_cataloguer(contexte(user))
     with t2:
         onglet_acces(user)
     with t3:
@@ -815,6 +1252,10 @@ def _creer_acces(personnes: list[dict]) -> tuple[list[str], list[str]]:
                            f"(attendu : {', '.join(POSTES)})")
             continue
         p = {**p, "Poste": poste, "Service": POSTES[poste]}
+        if p.get("Rôle") == "Chef de service" and (chef_du_service(p["Service"]) or any(
+                r["Rôle"] == "Chef de service" and r["Service"] == p["Service"] for r in rows)):
+            erreurs.append(f"« {nom} » : le service {poste} a déjà un responsable (un seul chef par service)")
+            continue
         if nom.lower() in noms:
             erreurs.append(f"« {nom} » existe déjà (un nom doit être unique)")
             continue
@@ -832,6 +1273,14 @@ def _creer_acces(personnes: list[dict]) -> tuple[list[str], list[str]]:
         get_store().append("UTILISATEURS", rows)
         refresh()
     return lignes, erreurs
+
+
+def _chefs_en_double(users: pd.DataFrame) -> list[str]:
+    """Services ayant plus d'un « Chef de service » actif (users : colonnes Nom, Poste, Rôle, Actif)."""
+    u = users.copy()
+    u["_svc"] = u["Poste"].map(lambda p: POSTES.get(as_text(p), as_text(p)))
+    u = u.loc[(u["Rôle"].map(as_text) == "Chef de service") & u["Actif"].map(lambda v: v is True or _actif(v)).astype(bool)]
+    return [f"{svc} : {', '.join(g['Nom'].map(as_text))}" for svc, g in u.groupby("_svc") if len(g) > 1]
 
 
 def onglet_acces(user: dict):
@@ -912,7 +1361,9 @@ def onglet_acces(user: dict):
         column_config={
             "Poste": st.column_config.SelectboxColumn(options=postes),
             "Rôle": st.column_config.SelectboxColumn(options=ROLES, required=True,
-                                                     help="Acheteur : onglet Achats · Direction : valide les BC"),
+                                                     help="Chef de service : vise les DA de son service (un seul par "
+                                                          "service) · Acheteur : onglet Achats · Direction : valide "
+                                                          "les DA (niveau DG) et les BC"),
             "Chantier": st.column_config.SelectboxColumn(options=ch_codes),
             "Service": st.column_config.TextColumn(help="Suit automatiquement le poste"),
             "Actif": st.column_config.CheckboxColumn(help="Décocher pour couper l'accès"),
@@ -933,7 +1384,10 @@ def onglet_acces(user: dict):
                 diff["Actif"] = "TRUE" if bool(apres.at[n, "Actif"]) else "FALSE"
             if diff:
                 changes[n] = diff
-        if changes:
+        doublons = _chefs_en_double(ed)
+        if doublons:
+            st.error("Un seul responsable (rôle « Chef de service ») par service : " + " ; ".join(doublons))
+        elif changes:
             get_store().update_many("UTILISATEURS", "Nom", changes)
             refresh()
             st.session_state.acc_v = version + 1
@@ -960,10 +1414,14 @@ def onglet_acces(user: dict):
 
 
 def onglet_analyses(ctx=None):
-    t_da, t_ach = st.tabs(["Demandes d'achat", "Achats"])
-    with t_ach:
+    # un seul volet calculé à la fois (des onglets imbriqués calculeraient les deux à chaque affichage)
+    vue = st.segmented_control("Analyse", ["Demandes d'achat", "Achats", "Prix"], default="Demandes d'achat",
+                               key="an-vue", label_visibility="collapsed") or "Demandes d'achat"
+    if vue == "Achats":
         achats.analyses_achats(ctx)
-    with t_da:
+    elif vue == "Prix":
+        prix.vue_evolution(ctx)
+    else:
         _analyses_da()
 
 
@@ -976,17 +1434,33 @@ def _analyses_da():
     da["_date"] = pd.to_datetime(da["Date DA"].map(to_date))
     da["_val"] = pd.to_datetime(da["Date validation"].map(to_date))
     delai = (da["_val"] - da["_date"]).dt.days.dropna()
+    da["_visa"] = pd.to_datetime(da["Date visa Resp. service"].map(to_date))
+    d1 = (da["_visa"] - da["_date"]).dt.days.dropna()
+    d2 = (da["_val"] - da["_visa"]).dt.days.dropna()
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("DA", len(da))
     k2.metric("Articles", len(lg))
     k3.metric("Urgentes / critiques", f"{(da['Priorité'].isin(['Urgente', 'Critique'])).mean():.0%}")
-    k4.metric("Délai de validation", f"{delai.mean():.1f} j" if len(delai) else "–")
+    k4.metric("Délai total de validation", f"{delai.mean():.1f} j" if len(delai) else "–")
+    j1, j2, j3 = st.columns(3)
+    j1.metric("Délai visa Resp. service", f"{d1.mean():.1f} j" if len(d1) else "–")
+    j2.metric("Délai validation DG", f"{d2.mean():.1f} j" if len(d2) else "–")
+    j3.metric("En attente de validation", int(da["Statut"].isin(DA_EN_ATTENTE).sum()))
 
-    st.markdown("##### DA par chantier et par mois")
     da["Mois"] = da["_date"].dt.strftime("%Y-%m")
-    st.dataframe(pd.crosstab(da["Chantier"], da["Mois"]), width="stretch")
-    st.markdown("##### DA par statut")
-    st.dataframe(da["Statut"].value_counts().rename("DA"), width="stretch")
+    noms_ch = refs()["chantiers"]
+    par_mois = (da.assign(Chantier=da["Chantier"].map(lambda c: noms_ch.get(as_text(c), as_text(c))), DA=1)
+                .groupby(["Mois", "Chantier"], as_index=False)["DA"].sum())
+    graphs.empile_mois(par_mois, "Mois", "Chantier", "DA", "DA par mois et par chantier", "da-mois")
+    c1, c2 = st.columns(2)
+    with c1:
+        stt = da["Statut"].value_counts().rename_axis("Statut").reset_index(name="DA")
+        graphs.barres(stt, "Statut", "DA", "DA par statut", "da-statut")
+    with c2:
+        svc = refs()["services"]
+        sv = (da["Service Demandeur"].map(lambda c: svc.get(as_text(c), as_text(c)) or "—").value_counts()
+              .rename_axis("Service").reset_index(name="DA"))
+        graphs.barres(sv, "Service", "DA", "DA par service", "da-service", top=10)
     lg2 = lg.copy()
     lg2["Quantité"] = pd.to_numeric(lg2["Quantité"], errors="coerce")
     art = load("ARTICLES")
@@ -994,29 +1468,31 @@ def _analyses_da():
     lg2["Famille"] = lg2["Code Article"].map(lambda c: fam.get(as_text(c), "Hors catalogue"))
     lg2["Référence"] = lg2["Référence"].map(as_text).replace("", "(sans référence)")
 
-    st.markdown("##### Commandes par famille")
-    st.dataframe(lg2.groupby("Famille").agg(Lignes=("ID_Ligne", "size"), DA=("ID_DA", "nunique"))
-                 .sort_values("DA", ascending=False), width="stretch")
-    st.markdown("##### Commandes par type d'article (désignation)")
+    fam_t = (lg2.groupby("Famille").agg(DA=("ID_DA", "nunique"), Lignes=("ID_Ligne", "size"))
+             .sort_values("DA", ascending=False).reset_index())
+    graphs.barres(fam_t, "Famille", "DA", "Familles d'articles les plus demandées (nombre de DA)", "da-fam",
+                  infos=["Lignes"])
     top = (lg2.groupby(["Désignation", "Colisage"])
            .agg(Quantité=("Quantité", "sum"), DA=("ID_DA", "nunique"), Références=("Référence", "nunique"))
            .sort_values("DA", ascending=False).reset_index())
-    st.dataframe(top.head(30), hide_index=True, width="stretch")
+    graphs.barres(top, "Désignation", "DA", "Articles les plus demandés (nombre de DA)", "da-top",
+                  infos=["Quantité", "Colisage", "Références"], table=top.head(100))
     choix = st.selectbox("Détail par référence pour", top["Désignation"].unique(), index=None,
                          placeholder="Choisir un type d'article (ex. BETON PRET A L'EMPLOI)")
     if choix:
         det = (lg2.loc[lg2["Désignation"] == choix].groupby(["Référence", "Colisage"])
                .agg(Quantité=("Quantité", "sum"), DA=("ID_DA", "nunique"))
                .sort_values("Quantité", ascending=False).reset_index())
-        st.dataframe(det, hide_index=True, width="stretch")
+        graphs.barres(det, "Référence", "Quantité", f"{choix} : quantités demandées par référence", "da-det",
+                      fmt=",.2~f", infos=["Colisage", "DA"])
 
     flat = lg.merge(da[["ID_DA", "Statut", "Priorité", "Demandeur", "Responsable", "Date besoin",
                         "Validé par", "Date validation", "Motif rejet"]], on="ID_DA", how="left")
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as xw:
         flat.to_excel(xw, sheet_name="Lignes_DA", index=False)
-        da.drop(columns=["_date", "_val", "Mois"]).to_excel(xw, sheet_name="DA", index=False)
-        for t in ("BC", "BC_LIGNES", "LIVRAISONS", "TCP", "TCP_OFFRES"):
+        da.drop(columns=["_date", "_val", "_visa", "Mois"]).to_excel(xw, sheet_name="DA", index=False)
+        for t in ("VALIDATIONS_DA", "BC", "BC_LIGNES", "LIVRAISONS", "TCP", "TCP_OFFRES"):
             load(t).to_excel(xw, sheet_name=t, index=False)
     st.download_button("Exporter la base pour analyse (Excel)", out.getvalue(),
                        file_name=f"Export_DA_{date.today():%Y%m%d}.xlsx",
@@ -1039,7 +1515,7 @@ def _fragment(fn, nom: str):
 def contexte(user: dict):
     from types import SimpleNamespace
     return SimpleNamespace(load=load, refresh=refresh, get_store=get_store, refs=refs, picker=choisir_article,
-                           user=user, fragment=_fragment)
+                           user=user, fragment=_fragment, version=version_donnees)
 
 
 def bloquer_traduction():
@@ -1072,6 +1548,14 @@ def main():
     user = st.session_state.user
     admin = user["Rôle"] in ROLES_ADMIN
     badge = f'<span class="pwc-badge">{user["Rôle"].upper()}</span>' if user["Rôle"] != "Demandeur" else ""
+    if user["Rôle"] in ROLES_VALID_DA:
+        n_val = nb_a_valider(user)
+        if n_val:
+            badge += f'<br><span class="pwc-badge">🔔 {n_val} DA à valider</span>'
+    if user["Rôle"] == "Admin":
+        n_cat = catalogage.nb_a_analyser(contexte(user))
+        if n_cat:
+            badge += f'<br><span class="pwc-badge">📦 {n_cat} article(s) à cataloguer</span>'
     h1, h0, h2 = st.columns([5, 1, 1], vertical_alignment="center")
     h1.markdown(f'<div class="pwc-bar"><div class="t">DA <span>Chantier</span> PWC</div>'
                 f'<div class="u">{user["Nom"]}{badge}</div></div>', unsafe_allow_html=True)
@@ -1088,6 +1572,8 @@ def main():
     # l'acheteur ne saisit pas de DA : il consulte les DA et fait les TCP et les BC (onglet Achats)
     onglets = {} if role == "Acheteur" else {"Nouvelle DA": lambda: onglet_nouvelle(user),
                                              "Mes DA": lambda: onglet_mes_da(user)}
+    if role in ROLES_VALID_DA:  # libellé fixe : un libellé qui change ferait revenir sur le premier onglet
+        onglets["Validation DA"] = lambda: onglet_validation_da(user)
     if role in ROLES_ACHATS:
         onglets["Achats"] = lambda: achats.onglet_achats(ctx)
     if role in ROLES_VALID_BC:
