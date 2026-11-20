@@ -22,6 +22,7 @@ import achats
 import catalogage
 import graphs
 import prix
+import stats
 from schema import (TABLES, ANCIENS_STATUTS, COLISAGES, DA_EN_ATTENTE, PRIORITES, ROLES, ROLES_ACHATS, ROLES_ADMIN,
                     ROLES_DG, ROLES_VALID_BC, ROLES_VALID_DA, STATUTS, STATUTS_LIGNE, LIGNE_BC_RETIREE)
 from storage import ExcelStore, GoogleSheetStore
@@ -1580,6 +1581,7 @@ def main():
         onglets["Validation BC"] = lambda: achats.onglet_validation_bc(ctx)
     if admin:
         onglets["Administration"] = lambda: onglet_admin(user)
+        onglets["Statistiques"] = lambda: stats.onglet_statistiques(ctx)  # administrateurs uniquement
     if role in ROLES_ADMIN | ROLES_VALID_BC:
         onglets["Analyses"] = lambda: onglet_analyses(ctx)
     # chaque onglet est un « fragment » : un clic dans un onglet ne recalcule que cet onglet
