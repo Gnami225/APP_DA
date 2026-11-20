@@ -80,10 +80,12 @@ def build_pdf(da: dict, lignes: list[dict], refs: dict) -> bytes:
         canvas.setFillColor(NOIR)
         canvas.drawString(15 * mm, 9 * mm, f"{numero}  —  Statut : {statut}")
         canvas.drawRightString(195 * mm, 9 * mm, f"Page {doc.page}")
-        if statut in ("Validée", "Rejetée"):
+        tampon = {"Validée DG": "VALIDÉE DG", "Validée": "VALIDÉE", "Rejetée": "REJETÉE",
+                  "Validée Resp. service": "VISA RESP. SERVICE"}.get(statut)
+        if tampon:
             canvas.setFont("Helvetica-Bold", 11)
             canvas.setFillColor(NOIR)
-            canvas.drawRightString(195 * mm, 287 * mm, statut.upper())
+            canvas.drawRightString(195 * mm, 287 * mm, tampon)
         canvas.restoreState()
 
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm,
@@ -147,10 +149,16 @@ def build_pdf(da: dict, lignes: list[dict], refs: dict) -> bytes:
     # ---- visas
     story.append(Paragraph("VISAS", _s["sec"]))
     v_dem = _p(f"Nom : {as_text(da.get('Demandeur'))}\nDate : {fmt_date(da.get('Date DA'))}\nSignature :")
-    v_resp = _p(f"Nom : {as_text(da.get('Responsable'))}\nDate :\nSignature :")
-    v_val = _p(f"Nom : {as_text(da.get('Validé par'))}\nDate : {fmt_date(da.get('Date validation'))}\nSignature :")
-    visas = Table([[_p(h, "th") for h in ["LE DEMANDEUR", "RESPONSABLE DU SERVICE DEMANDEUR",
-                                           "VALIDATION (DIRECTION / ACHATS)"]],
+    visa_resp = as_text(da.get("Visa Resp. service"))
+    v_resp = _p(f"Nom : {visa_resp or as_text(da.get('Responsable'))}\n"
+                f"Date : {fmt_date(da.get('Date visa Resp. service'))}\n"
+                + ("Validé dans l'application" if visa_resp else "Signature :"))
+    dg_ok = statut in ("Validée DG", "Validée")
+    v_val = _p(f"Nom : {as_text(da.get('Validé par')) if dg_ok else ''}\n"
+               f"Date : {fmt_date(da.get('Date validation')) if dg_ok else ''}\n"
+               + ("Validé dans l'application" if dg_ok else "Signature :"))
+    visas = Table([[_p(h, "th") for h in ["LE DEMANDEUR", "VISA RESPONSABLE DU SERVICE",
+                                           "VALIDATION DIRECTION GÉNÉRALE"]],
                    [v_dem, v_resp, v_val]],
                   colWidths=[60 * mm] * 3, rowHeights=[None, 30 * mm])
     visas.setStyle(TableStyle([
