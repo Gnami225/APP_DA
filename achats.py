@@ -9,6 +9,8 @@ import io
 import json
 from datetime import date
 
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -1494,6 +1496,15 @@ def onglet_parametres(ctx):
         ctx.refresh()
         st.rerun()
 
+    st.markdown("##### Reprise de BC antérieurs à l'application")
+    st.caption("Fichier Excel avec deux onglets, BC et BC_LIGNES, aux colonnes de l'application (fichier de reprise "
+               "préparé). Les BC dont le numéro existe déjà sont ignorés ; le prochain numéro de BC est relevé si "
+               "besoin ; les articles sans code partent dans « Articles à cataloguer ».")
+    f_bc = st.file_uploader("Fichier Excel des BC à reprendre", type=["xlsx"], key="rep-bc-up")
+    if f_bc is not None and st.button("Importer les BC", type="primary", key="rep-bc-go"):
+        with st.spinner("Import des BC…"):
+            st.success(importer_bc(ctx, f_bc))
+
     st.markdown("##### Base de prix (historique des achats)")
     h = ctx.load("PRIX_HISTORIQUE")
     st.caption(f"{len(h)} prix dans l'historique importé, plus les BC validés dans l'application. "
@@ -1509,6 +1520,58 @@ def onglet_parametres(ctx):
 # =========================================================================== archivage annuel (admin)
 _ARCHIVE = {"DA": "Date DA", "HISTORIQUE_ARTICLES": "DA_Date", "TCP": "Date TCP", "TCP_OFFRES": "Date TCP",
             "BC": "Date BC", "BC_LIGNES": "Date BC", "LIVRAISONS": "Date livraison", "VALIDATIONS_DA": "Date"}
+
+
+def importer_bc(ctx, fichier) -> str:
+    """Reprise de BC émis avant l'application (onglets BC et BC_LIGNES d'un fichier Excel)."""
+    import catalogage
+    xl = pd.read_excel(fichier, sheet_name=None, dtype=object)
+    if "BC" not in xl or "BC_LIGNES" not in xl:
+        return "Le fichier doit contenir les onglets « BC » et « BC_LIGNES »."
+    bc = xl["BC"].astype(object).where(xl["BC"].notna(), "")
+    bl = xl["BC_LIGNES"].astype(object).where(xl["BC_LIGNES"].notna(), "")
+    store = ctx.get_store()
+    existants = set(store.read("BC")["N° BC"].map(as_text))
+    deja = sorted(set(bc["N° BC"].map(as_text)) & existants)
+    bc = bc.loc[~bc["N° BC"].map(as_text).isin(existants)]
+    bl = bl.loc[bl["N° BC"].map(as_text).isin(set(bc["N° BC"].map(as_text)))]
+    if not len(bc):
+        return "Aucun BC à importer : tous les numéros existent déjà." + (f" ({', '.join(deja)})" if deja else "")
+    # chantier : nom -> code de l'onglet CHANTIERS quand il existe
+    ch = ctx.load("CHANTIERS")
+    plat = lambda t: " ".join(as_text(t).upper().replace("-", " ").split())
+    code_de = {plat(n): as_text(c) for c, n in zip(ch["Code Chantier"], ch["Nom Chantier"])}
+    code_de.update({plat(c): as_text(c) for c in ch["Code Chantier"]})
+    for d in (bc, bl):
+        d["Chantier"] = d["Chantier"].map(lambda v: code_de.get(plat(v), as_text(v)))
+    for c in ("Date BC", "Date validation"):
+        if c in bc.columns:
+            bc[c] = bc[c].map(lambda v: to_date(v).isoformat() if to_date(v) else as_text(v))
+    bl["Date BC"] = bl["Date BC"].map(lambda v: to_date(v).isoformat() if to_date(v) else as_text(v))
+    cols_bc, cols_bl = TABLES["BC"], TABLES["BC_LIGNES"]
+    store.append("BC", [{c: r.get(c, "") for c in cols_bc} for r in bc.to_dict("records")])
+    rows_bl = [{c: r.get(c, "") for c in cols_bl} for r in bl.to_dict("records")]
+    for i in range(0, len(rows_bl), 500):
+        store.append("BC_LIGNES", rows_bl[i:i + 500])
+    _ajoute_fournisseurs(ctx, [as_text(f) for f in bc["Fournisseur"] if "PRÉCISER" not in as_text(f)])
+    # numérotation : le prochain BC de l'application vient après les BC repris
+    p = params(ctx)
+    nums = [int(m.group(1)) for n in bc["N° BC"].map(as_text) if (m := re.search(r"(\d+)$", n))]
+    if nums and max(nums) + 1 > int(to_num(p.get("Prochain N° BC")) or 0):
+        store.update("PARAMETRES", "Paramètre", "Prochain N° BC", {"Valeur": str(max(nums) + 1)})
+    # articles sans code -> à cataloguer
+    hors = [r for r in rows_bl if not as_text(r.get("Code Article"))]
+    if hors:
+        store.append("ARTICLES_A_CATALOGUER", [{
+            "ID_Proposition": nouvel_id(10), "Date": maintenant(), "Désignation": as_text(r["Désignation"]).upper(),
+            "Référence": as_text(r["Référence"]).upper(), "Colisage": as_text(r["Unité"]),
+            "Saisi par": "Reprise BC", "Service": "", "Chantier": as_text(r["Chantier"]), "N° DA": as_text(r["N° BC"]),
+            "ID_DA": "", "ID_Ligne": catalogage.PREFIXE_BC + as_text(r["ID_LigneBC"]), "Statut": "À analyser"}
+            for r in hors])
+    ctx.refresh()
+    return (f"{len(bc)} BC importé(s) ({len(rows_bl)} lignes), {len(hors)} article(s) envoyé(s) dans « Articles à "
+            f"cataloguer »." + (f" Ignorés car déjà présents : {', '.join(deja)}." if deja else "")
+            + (f" Prochain N° BC : {max(nums) + 1}." if nums else ""))
 
 
 def onglet_archivage(ctx):
