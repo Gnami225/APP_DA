@@ -15,10 +15,12 @@ import streamlit as st
 from logic import (as_text, fmt_date, fmt_montant, maintenant, montant_ligne, next_numero_tcp, nouvel_id,
                    numero_bc, to_date, to_num, totaux, tva_ligne)
 from pdf import build_bc_pdf, build_tcp_pdf
-from schema import COLISAGES, CONDITIONS_DEFAUT, PARAMETRES_DEFAUT, STATUTS_BC, TABLES
+from schema import COLISAGES, CONDITIONS_DEFAUT, LIGNE_BC_RETIREE, PARAMETRES_DEFAUT, ROLES_ACHATS, STATUTS_BC, TABLES
+import graphs
+import prix
 
 BC_ACTIFS = {"Émis", "Validé"}  # un BC rejeté ou annulé libère les quantités de la DA
-DA_OUVERTES = ["Validée"]  # seules les DA validées partent aux achats
+DA_OUVERTES = ["Validée DG"]  # seules les DA validées par la DG partent aux achats
 
 
 # =========================================================================== paramètres
@@ -79,6 +81,7 @@ def suivi_lignes(ctx) -> pd.DataFrame:
     lg["Qté DA"] = lg["Quantité"].map(to_num)
     lg["Qté commandée"] = lg["_id"].map(cmd).fillna(0.0)
     lg["Reste à commander"] = (lg["Qté DA"] - lg["Qté commandée"]).clip(lower=0)
+    lg.loc[lg["Statut ligne"].map(as_text) == "Annulée", "Reste à commander"] = 0.0  # article retiré de la DA
     lg["BC"] = lg["_id"].map(nums).fillna("")
     return lg
 
@@ -121,7 +124,8 @@ def maj_lignes_da(ctx, ids_lignes: set[str]):
     store = ctx.get_store()
     bc, bl = store.read("BC"), store.read("BC_LIGNES")
     actifs = set(bc.loc[bc["Statut"].map(as_text).isin(BC_ACTIFS).astype(bool), "ID_BC"].map(as_text))
-    bl = bl.loc[bl["ID_BC"].map(as_text).isin(actifs).astype(bool)]
+    bl = bl.loc[bl["ID_BC"].map(as_text).isin(actifs).astype(bool)
+                & (bl["Statut livraison"].map(as_text) != LIGNE_BC_RETIREE)]
     lg = store.read("HISTORIQUE_ARTICLES")
     lg = lg.loc[lg["ID_Ligne"].map(as_text).isin(ids_lignes).astype(bool)]
     changes = {}
@@ -185,7 +189,7 @@ def _vue_da(ctx):
     k1, k2, k3 = st.columns(3)
     k1.metric("DA validées à commander", int((v["Achat"] == "À commander").sum()))
     k2.metric("Partiellement commandées", int((v["Achat"] == "Partielle").sum()))
-    k3.metric("DA en attente de validation", int((v["Statut"] == "Émise").sum()))
+    k3.metric("DA en attente de validation", int(v["Statut"].isin(["Émise", "Validée Resp. service"]).sum()))
     c1, c2 = st.columns(2)
     choix = c1.multiselect("Situation achat", ["À commander", "Partielle", "Commandée", "—"],
                            default=["À commander", "Partielle"], key="ach-da-f")
@@ -271,10 +275,15 @@ def _vue_tcp(ctx):
     # ---- 1) prix proposés, article par article
     st.markdown("##### 1. Prix unitaires HT proposés (FCFA)")
     st.caption("Laissez vide si le fournisseur n'a pas chiffré l'article. Décochez ✓ pour sortir un article du TCP.")
+    refs_l = [prix.ref_article(ctx, l["Code Article"], l["Désignation"], l["Référence"], l["Colisage"])
+              for _, l in lignes.iterrows()]
     grille = pd.DataFrame({
         "Inclure": True, "ID": lignes["_id"].values, "Désignation": lignes["Désignation"].map(as_text).values,
         "Référence": lignes["Référence"].map(as_text).values, "Unité": lignes["Colisage"].map(as_text).values,
-        "Quantité": lignes["Reste à commander"].values})
+        "Quantité": lignes["Reste à commander"].values,
+        "Meilleur prix passé": [prix.colonnes_ref(x)["Meilleur prix"] for x in refs_l],
+        "Prix moyen passé": [prix.colonnes_ref(x)["Prix moyen"] for x in refs_l]})
+    ref_de = dict(zip(lignes["_id"], refs_l))
     for j in range(nf):
         grille[f"PU{j}"] = None
     cfg = {"ID": None, "Inclure": st.column_config.CheckboxColumn("✓", width="small"),
@@ -282,7 +291,7 @@ def _vue_tcp(ctx):
     for j, n in enumerate(noms):
         cfg[f"PU{j}"] = st.column_config.NumberColumn(n, min_value=0.0, step=1.0, format="%.0f")
     ed = st.data_editor(grille, hide_index=True, width="stretch", column_config=cfg,
-                        disabled=["Désignation", "Référence", "Unité"],
+                        disabled=["Désignation", "Référence", "Unité", "Meilleur prix passé", "Prix moyen passé"],
                         key=f"tcp-grille-{da['_id']}-{'|'.join(noms)}")
     ed = ed.loc[ed["Inclure"].astype(bool) & (ed["Quantité"].map(to_num) > 0)].reset_index(drop=True)
     if not len(ed):
@@ -316,6 +325,8 @@ def _vue_tcp(ctx):
     if sans_prix:
         st.error("Le fournisseur retenu n'a pas chiffré : " + ", ".join(sans_prix))
         return
+    _alerte_prix(ctx, [(ed.at[i, "Désignation"], pu.at[i, n], ref_de.get(ed.at[i, "ID"]))
+                       for i, n in enumerate(retenus) if n], "retenu")
 
     # ---- 3) synthèse
     q = ed["Quantité"].map(to_num)
@@ -349,6 +360,23 @@ def _vue_tcp(ctx):
     obs = st.text_input("Observations du TCP (facultatif)", key="tcp-obs")
     if st.button("Enregistrer le TCP", type="primary", key="tcp-save", disabled=not any(retenus)):
         _enregistre_tcp(ctx, da, offres, ed, pu, retenus, best, sy, motif, obs)
+
+
+def _alerte_prix(ctx, items: list[tuple], quoi: str = "saisi"):
+    """Affiche les écarts de prix par rapport au prix moyen passé. items : (désignation, P.U. net, réf)."""
+    sp = prix.seuil(params(ctx))
+    rouges, oranges = [], []
+    for des, pu, s in items:
+        e = prix.ecart(to_num(pu), s)
+        niv = prix.niveau(e, s, sp)
+        if niv == "rouge":
+            rouges.append(f"{des} ({e:+.0f} %)")
+        elif niv == "orange":
+            oranges.append(f"{des} ({e:+.0f} %)")
+    if rouges:
+        st.error(f"🔴 Prix {quoi} supérieur de plus de {sp:g} % au prix moyen passé : " + ", ".join(rouges))
+    if oranges:
+        st.warning(f"🟠 Prix {quoi} un peu au-dessus du prix moyen passé : " + ", ".join(oranges))
 
 
 def _enregistre_tcp(ctx, da, offres, ed, pu, retenus, best, sy, motif, obs):
@@ -414,7 +442,8 @@ def pdf_tcp(ctx, tcp: dict, offres_rows: list[dict] | None = None) -> bytes:
         k = as_text(r["ID_Ligne_DA"]) or as_text(r["N° Ligne"])
         l = lignes.setdefault(k, {"Désignation": r["Désignation"], "Référence": r["Référence"], "Unité": r["Unité"],
                                   "Quantité": r["Quantité"], "prix": {}, "retenu": ""})
-        l["prix"][as_text(r["Fournisseur"])] = to_num(r["Prix unitaire HT"])
+        if to_num(r["Prix unitaire HT"]) > 0:  # offre retirée lors d'une modification : prix 0
+            l["prix"][as_text(r["Fournisseur"])] = to_num(r["Prix unitaire HT"])
         if as_text(r["Retenu"]).upper() in ("TRUE", "1", "VRAI"):
             l["retenu"] = as_text(r["Fournisseur"])
     p = params(ctx)
@@ -471,6 +500,99 @@ def _liste_tcp(ctx):
             st.rerun()
     if st.session_state.get("bc_prepare"):
         st.info("Ouvrez l'onglet « Bons de commande » : la DA et le TCP y sont déjà sélectionnés.")
+    admin = ctx.user.get("Rôle") == "Admin"
+    if (as_text(t["Statut"]) == "Établi" or admin) and as_text(t["Statut"]) != "Abandonné":
+        modifier_tcp(ctx, t, admin)
+
+
+def _est_retenu(v) -> bool:
+    return as_text(v).upper() in ("TRUE", "1", "VRAI")
+
+
+def modifier_tcp(ctx, t: dict, admin: bool):
+    """Modification d'un TCP : prix des fournisseurs, quantités, fournisseur retenu par article, motif.
+    Acheteur : tant qu'aucun BC n'est émis (statut « Établi »). Admin : à tout moment (sauf abandonné)."""
+    id_tcp = as_text(t["ID_TCP"])
+    if st.session_state.get("mtcp_msg"):
+        st.success(st.session_state.pop("mtcp_msg"))
+    with st.expander("✏️ Modifier ce TCP"):
+        if as_text(t["Statut"]) != "Établi":
+            st.warning(f"Des BC ont déjà été émis depuis ce TCP ({as_text(t['N° BC'])}) : ils ne sont pas modifiés "
+                       "automatiquement. Modifiez-les ou annulez-les si le fournisseur retenu change.")
+        o = ctx.load("TCP_OFFRES")
+        o = o.loc[o["ID_TCP"].map(as_text) == id_tcp].copy()
+        noms = [n for n in as_text(t["Fournisseurs consultés"]).split(" | ") if n]
+        noms += [n for n in dict.fromkeys(o["Fournisseur"].map(as_text)) if n and n not in noms]
+        o["_k"] = o["ID_Ligne_DA"].map(as_text).where(o["ID_Ligne_DA"].map(as_text) != "", o["N° Ligne"].map(as_text))
+        modele = o.sort_values("N° Ligne").drop_duplicates("_k").set_index("_k")
+        grille = pd.DataFrame({"_k": modele.index, "N°": modele["N° Ligne"].map(lambda x: int(to_num(x))).values,
+                               "Désignation": modele["Désignation"].map(as_text).values,
+                               "Référence": modele["Référence"].map(as_text).values,
+                               "Unité": modele["Unité"].map(as_text).values,
+                               "Quantité": modele["Quantité"].map(to_num).values})
+        prix_de = {(k, as_text(f)): to_num(p) for k, f, p in zip(o["_k"], o["Fournisseur"], o["Prix unitaire HT"])}
+        for j, n in enumerate(noms):
+            grille[f"PU{j}"] = [prix_de.get((k, n)) or None for k in grille["_k"]]
+        ret = {k: as_text(f) for k, f, r in zip(o["_k"], o["Fournisseur"], o["Retenu"]) if _est_retenu(r)}
+        grille["Retenu"] = [ret.get(k, "") for k in grille["_k"]]
+        cfg = {"_k": None, "Quantité": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
+               "Retenu": st.column_config.SelectboxColumn("Fournisseur retenu", options=[""] + noms)}
+        for j, n in enumerate(noms):
+            cfg[f"PU{j}"] = st.column_config.NumberColumn(n[:22], min_value=0.0, format="%.0f",
+                                                         help=f"Prix unitaire HT — {n} (vide = pas d'offre)")
+        ed = st.data_editor(grille, hide_index=True, width="stretch", key=f"mtcp-ed-{id_tcp}",
+                            disabled=["N°", "Désignation", "Référence", "Unité"], column_config=cfg)
+        motif = st.text_input("Motif des choix", value=as_text(t.get("Motif choix")), key=f"mtcp-mot-{id_tcp}")
+        obs = st.text_input("Observations", value=as_text(t.get("Observations")), key=f"mtcp-obs-{id_tcp}")
+        if not st.button("Enregistrer les modifications du TCP", type="primary", key=f"mtcp-go-{id_tcp}"):
+            return
+        erreurs = []
+        for _, r in ed.iterrows():
+            if r["Retenu"]:
+                pu = to_num(r[f"PU{noms.index(r['Retenu'])}"])
+                if pu <= 0:
+                    erreurs.append(f"{r['Désignation']} : le fournisseur retenu ({r['Retenu']}) n'a pas de prix.")
+        if erreurs:
+            for e in erreurs:
+                st.error(e)
+            return
+        exist = {(k, as_text(f)): as_text(i) for k, f, i in zip(o["_k"], o["Fournisseur"], o["ID_Offre"])}
+        changes, nouvelles = {}, []
+        total_ret = total_best = 0.0
+        for _, r in ed.iterrows():
+            k, q = r["_k"], to_num(r["Quantité"])
+            prix_l = {n: to_num(r[f"PU{j}"]) for j, n in enumerate(noms)}
+            chiffres = {n: p for n, p in prix_l.items() if p > 0}
+            if chiffres:
+                total_best += q * min(chiffres.values())
+            if r["Retenu"]:
+                total_ret += q * prix_l[r["Retenu"]]
+            m = modele.loc[k]
+            for n, p in prix_l.items():
+                vals = {"Prix unitaire HT": p, "Quantité": q, "Montant HT": montant_ligne(q, p) if p > 0 else 0,
+                        "Retenu": "TRUE" if r["Retenu"] == n and p > 0 else "FALSE"}
+                if (k, n) in exist:
+                    changes[exist[(k, n)]] = vals
+                elif p > 0:
+                    nouvelles.append({**{c: m[c] for c in ("ID_TCP", "N° TCP", "N° Ligne", "ID_Ligne_DA",
+                                                            "Code Article", "Désignation", "Référence", "Unité",
+                                                            "Date TCP", "N° DA", "Chantier")},
+                                      "ID_Offre": nouvel_id(10), "Fournisseur": n, **vals})
+        fours_ret = list(dict.fromkeys(x for x in ed["Retenu"] if x))
+        store = ctx.get_store()
+        with st.spinner("Enregistrement…"):
+            if changes:
+                store.update_many("TCP_OFFRES", "ID_Offre", changes)
+            if nouvelles:
+                store.append("TCP_OFFRES", nouvelles)
+            store.update("TCP", "ID_TCP", id_tcp, {
+                "Fournisseur retenu": " | ".join(fours_ret), "Montant retenu HT": round(total_ret),
+                "Montant moins-disant HT": round(total_best), "Motif choix": motif.strip(),
+                "Observations": obs.strip()})
+            maj_statut_tcp(ctx, id_tcp)
+            ctx.refresh(False)
+        st.session_state["mtcp_msg"] = f"TCP {as_text(t['N° TCP'])} modifié."
+        st.rerun()
 
 
 def _prepare_bc(id_da: str, id_tcp: str):
@@ -587,11 +709,15 @@ def _vue_bc(ctx):
         "Unité": lignes["Colisage"].map(as_text).values, "Reste DA": lignes["Reste à commander"].values,
         "Quantité": lignes["Reste à commander"].values,
         "Prix unitaire HT": [prix_tcp.get(i) for i in lignes["_id"]], "Remise %": 0.0, "TVA %": taux})
+    refs_l = [prix.colonnes_ref(prix.ref_article(ctx, l["Code Article"], l["Désignation"], l["Référence"],
+                                                 l["Colisage"])) for _, l in lignes.iterrows()]
+    grille.insert(grille.columns.get_loc("Prix unitaire HT"), "Meilleur prix passé", [x["Meilleur prix"] for x in refs_l])
+    grille.insert(grille.columns.get_loc("Prix unitaire HT"), "Prix moyen passé", [x["Prix moyen"] for x in refs_l])
     if t:  # seules les lignes attribuées à ce fournisseur dans le TCP sont cochées
         grille["Inclure"] = grille["ID"].map(lambda i: i in prix_tcp)
     ed = st.data_editor(
         grille, hide_index=True, width="stretch", key=f"bc-grille-{k}",
-        disabled=["Désignation", "Reste DA"],
+        disabled=["Désignation", "Reste DA", "Meilleur prix passé", "Prix moyen passé"],
         column_config={"ID": None, "Code Article": None,
                        "Inclure": st.column_config.CheckboxColumn("✓", width="small"),
                        "Unité": st.column_config.SelectboxColumn(options=sorted(set(COLISAGES) | set(grille["Unité"]))),
@@ -638,6 +764,7 @@ def _vue_bc(ctx):
 
     sel = ed.loc[ed["Inclure"].astype(bool) & (ed["Quantité"].map(to_num) > 0)].to_dict("records")
     tout = sel + st.session_state[extra_key]
+    _controle_bc(ctx, tout)
     tot = totaux(tout, taux)
     m1, m2, m3 = st.columns(3)
     m1.metric("Total HT", f"{fmt_montant(tot['Total HT'])} F")
@@ -672,10 +799,40 @@ def _vue_bc(ctx):
         st.rerun()
 
 
+def _controle_bc(ctx, tout: list[dict]):
+    """Écart de chaque prix saisi (net de remise) avec le prix moyen passé de l'article."""
+    lignes = [l for l in tout if to_num(l.get("Prix unitaire HT")) > 0]
+    if not lignes:
+        return
+    ctl = prix.controle_lignes(ctx, lignes, prix.seuil(params(ctx)))
+    _alerte_prix(ctx, [(r["Désignation"], r["P.U. net saisi"],
+                        {"moyenne": r["_ref"], "indicatif": r["_niv"] == "indicatif"} if r["_ref"] else None)
+                       for _, r in ctl.iterrows()])
+    avec = ctl.loc[ctl["_ref"].notna()]
+    if len(avec):
+        with st.expander(f"Contrôle des prix : {len(avec)}/{len(ctl)} article(s) avec un prix passé"):
+            st.dataframe(avec.assign(**{"P.U. net saisi": avec["P.U. net saisi"].map(fmt_montant)})
+                         [["Désignation", "Référence", "P.U. net saisi", "Dernier prix", "Meilleur prix", "Prix moyen",
+                           "Achats", "Écart vs moyenne"]], hide_index=True, width="stretch")
+            st.caption("🟢 ≤ +5 % · 🟠 +5 à +{0:g} % · 🔴 > +{0:g} % · ⚪ indicatif (transport, frais, réparations, "
+                       "locations) · ⚠ un seul achat connu".format(prix.seuil(params(ctx))))
+
+
 def _taux_entete(lignes: list[dict], defaut: float):
     """Taux affiché en en-tête du BC : le taux commun, ou « Mixte » si les articles ont des taux différents."""
     taux = {to_num(l.get("TVA %", defaut)) for l in lignes}
     return (taux.pop() if len(taux) == 1 else "Mixte") if taux else defaut
+
+
+def _ref_ligne(ctx, l: dict) -> dict:
+    """Prix de référence et écart mémorisés sur la ligne de BC (trace pour la validation et l'audit)."""
+    s = prix.ref_article(ctx, l.get("Code Article"), l.get("Désignation"), l.get("Référence"), l.get("Unité"))
+    pu = to_num(l.get("Prix unitaire HT")) * (1 - to_num(l.get("Remise %")) / 100)
+    e = prix.ecart(pu, s)
+    if e is None:
+        return {"Prix réf. HT": "", "Écart prix %": ""}
+    return {"Prix réf. HT": round(s["moyenne"], 2),
+            "Écart prix %": "" if s.get("indicatif") else round(e, 1)}
 
 
 def _enregistre_bc(ctx, e: dict, lignes: list[dict]):
@@ -704,7 +861,7 @@ def _enregistre_bc(ctx, e: dict, lignes: list[dict]):
                          "TVA %": to_num(l.get("TVA %")), "Montant TVA": round(tva_ligne(l), 2),
                          "Montant HT": montant_ligne(l["Quantité"], l["Prix unitaire HT"], l.get("Remise %")),
                          "Fournisseur": e["four"], "Date BC": d, "Chantier": as_text(da["Chantier"]),
-                         "N° DA": as_text(da["N° DA"])})
+                         "N° DA": as_text(da["N° DA"]), **_ref_ligne(ctx, l)})
         bc = {"ID_BC": id_bc, "N° BC": numero, "Date BC": d, "ID_DA": da["_id"], "N° DA": as_text(da["N° DA"]),
               "Chantier": as_text(da["Chantier"]), "Code Parc": e["parc"], "Magasin": e["magasin"],
               "Fournisseur": e["four"], "Condition règlement": e["cond"], "Total HT": e["tot"]["Total HT"],
@@ -743,6 +900,42 @@ def _filtre_bc(ctx, bc: pd.DataFrame, key: str, defaut=None) -> pd.DataFrame:
     return bc.sort_values("Créé le", ascending=False)
 
 
+def _ecarts_lignes(ctx, l: pd.DataFrame) -> list[tuple]:
+    """(écart %, niveau, prix réf.) de chaque ligne de BC : valeur mémorisée à l'émission, sinon calculée."""
+    sp = prix.seuil(params(ctx))
+    out = []
+    for _, r in l.iterrows():
+        e_mem, ref_mem = as_text(r.get("Écart prix %")), to_num(r.get("Prix réf. HT"))
+        if e_mem:
+            e = to_num(e_mem)
+            out.append((e, prix.niveau(e, {}, sp), ref_mem))
+            continue
+        if ref_mem:  # famille non comparable : prix réf. mémorisé sans écart
+            out.append((None, "indicatif", ref_mem))
+            continue
+        s = prix.ref_article(ctx, r.get("Code Article"), r.get("Désignation"), r.get("Référence"), r.get("Unité"))
+        e = prix.ecart(to_num(r.get("Prix unitaire HT")) * (1 - to_num(r.get("Remise %")) / 100), s)
+        out.append((e, prix.niveau(e, s, sp), s["moyenne"] if s and not s.get("autre_unite") else None))
+    return out
+
+
+def alertes_bc(ctx, ids: set[str]) -> dict[str, str]:
+    """Résumé des écarts de prix par BC : « 🔴 +38 % (2) » = 2 articles au-delà du seuil, écart max +38 %."""
+    bl = ctx.load("BC_LIGNES")
+    bl = bl.loc[bl["ID_BC"].map(as_text).isin(ids).astype(bool)]
+    out = {}
+    for i, l in bl.groupby(bl["ID_BC"].map(as_text)):
+        ec = [(e, n) for e, n, _ in _ecarts_lignes(ctx, l) if e is not None and n != "indicatif"]
+        if not ec:
+            out[i] = ""
+            continue
+        emax = max(e for e, _ in ec)
+        nr = sum(1 for _, n in ec if n == "rouge")
+        niv = "rouge" if nr else ("orange" if any(n == "orange" for _, n in ec) else "vert")
+        out[i] = f"{prix.PASTILLE[niv]} {emax:+.0f} %" + (f" ({nr})" if nr else "")
+    return out
+
+
 def _table_bc(bc: pd.DataFrame) -> pd.DataFrame:
     v = bc.copy()
     v["Date"] = v["Date BC"].map(fmt_date)
@@ -751,6 +944,8 @@ def _table_bc(bc: pd.DataFrame) -> pd.DataFrame:
 
 
 def _liste_bc(ctx):
+    if st.session_state.get("lbc_msg"):
+        st.success(st.session_state.pop("lbc_msg"))
     bc = ctx.load("BC")
     if not len(bc):
         st.info("Aucun bon de commande.")
@@ -778,6 +973,10 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
            "Montant HT", "TVA %", "Qté livrée", "Date livraison"]].rename(columns={"Code_Parc": "Code parc"}).copy()
     v["Date livraison"] = v["Date livraison"].map(fmt_date)
     v["Qté livrée"] = v["Qté livrée"].map(lambda x: f"{to_num(x):g}" if as_text(x) else "")
+    ec = _ecarts_lignes(ctx, l)
+    v.insert(v.columns.get_loc("Montant HT"), "Prix moyen passé", [fmt_montant(r) if r else "" for _, _, r in ec])
+    v.insert(v.columns.get_loc("Montant HT"), "Écart prix", [prix.fmt_ecart(e, n) if n != "indicatif" else
+                                                              ("⚪ indicatif" if r else "") for e, n, r in ec])
     v["Prix unitaire HT"] = v["Prix unitaire HT"].map(fmt_montant)
     v["Montant HT"] = v["Montant HT"].map(fmt_montant)
     st.dataframe(v, hide_index=True, width="stretch")
@@ -790,6 +989,9 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
     c1, c2 = st.columns(2)
     c1.download_button("Télécharger / imprimer le BC", pdf_bc(ctx, b, l.to_dict("records")), file_name=nom,
                        mime="application/pdf", type="primary", key=f"{key}-pdf")
+    if annuler and ctx.user.get("Rôle") in ROLES_ACHATS and (
+            statut in ("Émis", "Rejeté") or (statut == "Validé" and ctx.user.get("Rôle") == "Admin")):
+        modifier_bc(ctx, b, l)
     if annuler and statut in ("Émis", "Rejeté"):
         if c2.button("Annuler ce BC (libère les quantités de la DA)", key=f"{key}-ann"):
             ctx.get_store().update("BC", "ID_BC", as_text(b["ID_BC"]), {"Statut": "Annulé"})
@@ -797,6 +999,134 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
             maj_statut_tcp(ctx, as_text(b.get("ID_TCP")))
             ctx.refresh(False)
             st.rerun()
+
+
+def modifier_bc(ctx, b: dict, l: pd.DataFrame):
+    """Modification d'un BC tant qu'il n'est pas validé (Émis ou Rejeté) : quantités, prix, remises, TVA,
+    codes parc, lignes retirées, conditions, magasin, observations. Un BC rejeté repart en validation."""
+    id_bc, rejete = as_text(b["ID_BC"]), as_text(b["Statut"]) == "Rejeté"
+    valide = as_text(b["Statut"]) == "Validé"  # seul l'admin modifie un BC validé ; il reste validé
+    with st.expander("✏️ Corriger et renvoyer le BC en validation" if rejete else
+                     "✏️ Modifier ce BC (admin — BC validé)" if valide else "✏️ Modifier ce BC", expanded=rejete):
+        if valide:
+            st.warning("BC déjà validé : la modification est enregistrée à votre nom, le BC reste validé. "
+                       "Les quantités ne peuvent pas descendre sous les quantités déjà livrées.")
+        p = params(ctx)
+        conds = conditions(ctx)
+        c1, c2 = st.columns(2)
+        cond_act = as_text(b["Condition règlement"])
+        opts = conds if cond_act in conds or not cond_act else conds + [cond_act]
+        cond = c1.selectbox("Conditions de règlement", opts, index=opts.index(cond_act) if cond_act in opts else None,
+                            accept_new_options=True, key=f"mbc-cond-{id_bc}")
+        magasin = c2.text_input("Magasin", value=as_text(b.get("Magasin")), key=f"mbc-mag-{id_bc}")
+        obs = st.text_input("Observations", value=as_text(b.get("Observations")), key=f"mbc-obs-{id_bc}")
+
+        # quantité maximale par ligne de DA : quantité DA - commandé dans les autres BC actifs
+        bc_all, bl_all = ctx.load("BC"), ctx.load("BC_LIGNES")
+        actifs = set(bc_all.loc[bc_all["Statut"].map(as_text).isin(BC_ACTIFS).astype(bool), "ID_BC"].map(as_text))
+        autres = bl_all.loc[bl_all["ID_BC"].map(as_text).isin(actifs - {id_bc}).astype(bool)]
+        deja = autres.groupby(autres["ID_Ligne_DA"].map(as_text))["Quantité"].apply(lambda x: sum(map(to_num, x)))
+        lgda = ctx.load("HISTORIQUE_ARTICLES")
+        qda = dict(zip(lgda["ID_Ligne"].map(as_text), lgda["Quantité"].map(to_num)))
+        v = pd.DataFrame({
+            "ID_LigneBC": l["ID_LigneBC"].map(as_text).values, "ID_Ligne_DA": l["ID_Ligne_DA"].map(as_text).values,
+            "Code Article": l["Code Article"].map(as_text).values,
+            "Désignation": l["Désignation"].map(as_text).values, "Référence": l["Référence"].map(as_text).values,
+            "Code parc": l["Code_Parc"].map(as_text).values, "Unité": l["Unité"].map(as_text).values,
+            "Max DA": [round(qda[i] - deja.get(i, 0), 2) if i in qda else None for i in l["ID_Ligne_DA"].map(as_text)],
+            "Quantité": l["Quantité"].map(to_num).values, "Prix unitaire HT": l["Prix unitaire HT"].map(to_num).values,
+            "Remise %": l["Remise %"].map(to_num).values, "TVA %": l["TVA %"].map(to_num).values})
+        st.caption("Modifiez le tableau. Pour retirer un article : cochez la ligne puis 🗑 (ou quantité 0). "
+                   "« Max DA » = reste de la DA non commandé dans les autres BC.")
+        ed = st.data_editor(
+            v, hide_index=True, width="stretch", key=f"mbc-ed-{id_bc}", num_rows="delete",
+            disabled=["Désignation", "Référence", "Max DA"],
+            column_config={"ID_LigneBC": None, "ID_Ligne_DA": None, "Code Article": None,
+                           "Unité": st.column_config.SelectboxColumn(options=sorted(set(COLISAGES) | set(v["Unité"]))),
+                           "Max DA": st.column_config.NumberColumn(format="%.2f"),
+                           "Quantité": st.column_config.NumberColumn(min_value=0.0, format="%.2f"),
+                           "Prix unitaire HT": st.column_config.NumberColumn("P.U. HT (FCFA)", min_value=0.0,
+                                                                             format="%.0f"),
+                           "Remise %": st.column_config.NumberColumn(min_value=0.0, max_value=100.0, format="%.1f"),
+                           "TVA %": st.column_config.NumberColumn(min_value=0.0, max_value=100.0, format="%.1f")})
+        ed = ed.dropna(subset=["ID_LigneBC"])
+        gardees = ed.loc[ed["Quantité"].map(to_num) > 0].to_dict("records")
+        _controle_bc(ctx, gardees)
+        taux = to_num(p.get("Taux TVA (%)"))
+        tot = totaux(gardees, taux)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total HT", f"{fmt_montant(tot['Total HT'])} F", f"{fmt_montant(tot['Total HT'] - to_num(b['Total HT']))} F"
+                  if tot["Total HT"] != to_num(b["Total HT"]) else None, delta_color="inverse")
+        m2.metric("TVA", f"{fmt_montant(tot['Montant TVA'])} F")
+        m3.metric("Total TTC", f"{fmt_montant(tot['Total TTC'])} F")
+        depasse = [x["Désignation"] for x in gardees
+                   if x["Max DA"] is not None and x["Max DA"] == x["Max DA"] and to_num(x["Quantité"]) > to_num(x["Max DA"]) + 1e-9]
+        ok_dep = True
+        if depasse:
+            st.warning("Quantité supérieure au reste de la DA pour : " + ", ".join(depasse))
+            ok_dep = st.checkbox("Je confirme le dépassement (justifier dans Observations)", key=f"mbc-dep-{id_bc}")
+        libelle = "Renvoyer le BC corrigé en validation" if rejete else "Enregistrer les modifications du BC"
+        if not st.button(libelle, type="primary", key=f"mbc-go-{id_bc}"):
+            return
+        erreurs = []
+        if not gardees:
+            erreurs.append("Le BC doit garder au moins un article (sinon, annulez-le).")
+        if not cond:
+            erreurs.append("Choisissez les conditions de règlement.")
+        sans_prix = [x["Désignation"] for x in gardees if to_num(x["Prix unitaire HT"]) <= 0]
+        if sans_prix:
+            erreurs.append("Prix manquant pour : " + ", ".join(sans_prix))
+        if depasse and (not ok_dep or not obs.strip()):
+            erreurs.append("Dépassement de quantité : cochez la confirmation et justifiez dans Observations.")
+        store = ctx.get_store()
+        frais = store.read("BC")
+        frais = frais.loc[frais["ID_BC"].map(as_text) == id_bc]
+        livre = dict(zip(l["ID_LigneBC"].map(as_text), l["Qté livrée"].map(to_num)))
+        sous_livre = [x["Désignation"] for x in ed.to_dict("records")
+                      if to_num(x["Quantité"]) < livre.get(as_text(x["ID_LigneBC"]), 0) - 1e-9]
+        sous_livre += [d for i, d in zip(l["ID_LigneBC"].map(as_text), l["Désignation"])
+                       if i not in set(ed["ID_LigneBC"]) and livre.get(i, 0) > 0]
+        if sous_livre:
+            erreurs.append("Quantité inférieure à la quantité déjà livrée : " + ", ".join(map(as_text, sous_livre)))
+        permis = ("Émis", "Rejeté", "Validé") if valide else ("Émis", "Rejeté")
+        if len(frais) and as_text(frais.iloc[0]["Statut"]) not in permis:
+            erreurs.append(f"Ce BC est maintenant « {as_text(frais.iloc[0]['Statut'])} » : il n'est plus modifiable.")
+        if erreurs:
+            for e in erreurs:
+                st.error(e)
+            return
+        changes = {}
+        for x in ed.to_dict("records"):
+            ligne = {"Code_Parc": as_text(x["Code parc"]).upper(), "Unité": as_text(x["Unité"]),
+                     "Quantité": to_num(x["Quantité"]), "Prix unitaire HT": to_num(x["Prix unitaire HT"]),
+                     "Remise %": to_num(x["Remise %"]), "TVA %": to_num(x["TVA %"])}
+            if ligne["Quantité"] <= 0:
+                changes[x["ID_LigneBC"]] = {"Statut livraison": LIGNE_BC_RETIREE, "Quantité": 0, "Montant HT": 0,
+                                            "Montant TVA": 0}
+                continue
+            ligne.update({"Montant HT": montant_ligne(x["Quantité"], x["Prix unitaire HT"], x["Remise %"]),
+                          "Montant TVA": round(tva_ligne(x), 2), "Fournisseur": as_text(b["Fournisseur"]),
+                          **_ref_ligne(ctx, x)})
+            changes[x["ID_LigneBC"]] = ligne
+        for idl in set(v["ID_LigneBC"]) - set(ed["ID_LigneBC"]):  # lignes supprimées du tableau
+            changes[idl] = {"Statut livraison": LIGNE_BC_RETIREE, "Quantité": 0, "Montant HT": 0, "Montant TVA": 0}
+        with st.spinner("Enregistrement…"):
+            store.update_many("BC_LIGNES", "ID_LigneBC", changes)
+            store.update("BC", "ID_BC", id_bc, {
+                "Condition règlement": as_text(cond), "Magasin": magasin.strip(), "Observations": obs.strip(),
+                "Code Parc": ", ".join(dict.fromkeys(as_text(x["Code parc"]).upper() for x in gardees
+                                                     if as_text(x["Code parc"]))),
+                "Total HT": tot["Total HT"], "Montant TVA": tot["Montant TVA"], "Total TTC": tot["Total TTC"],
+                "Taux TVA": _taux_entete(gardees, taux), "Modifié le": maintenant(), "Modifié par": ctx.user.get("Nom", ""),
+                **({} if valide else {"Statut": "Émis", "Motif rejet": "", "Validé par": "", "Date validation": ""})})
+            maj_lignes_da(ctx, {as_text(i) for i in v["ID_Ligne_DA"] if as_text(i)})
+            maj_statut_tcp(ctx, as_text(b.get("ID_TCP")))
+            if valide:
+                maj_livraisons(ctx, {id_bc})
+            ctx.refresh(False)
+        st.session_state["lbc_msg"] = (f"BC {as_text(b['N° BC'])} modifié" +
+                                       (" et renvoyé en validation." if rejete else "."))
+        st.rerun()
 
 
 # =========================================================================== suivi des livraisons
@@ -814,7 +1144,8 @@ def maj_livraisons(ctx, ids_bc: set[str]):
     store = ctx.get_store()
     lv, bl = store.read("LIVRAISONS"), store.read("BC_LIGNES")
     lv = lv.loc[lv["ID_BC"].map(as_text).isin(ids_bc).astype(bool)]
-    bl = bl.loc[bl["ID_BC"].map(as_text).isin(ids_bc).astype(bool)]
+    bl = bl.loc[bl["ID_BC"].map(as_text).isin(ids_bc).astype(bool)
+                & (bl["Statut livraison"].map(as_text) != LIGNE_BC_RETIREE)]
     ch_l, ch_b = {}, {}
     for _, l in bl.iterrows():
         g = lv.loc[lv["ID_LigneBC"].map(as_text) == as_text(l["ID_LigneBC"])]
@@ -838,8 +1169,8 @@ def _suivi_bc(ctx) -> tuple[pd.DataFrame, pd.DataFrame]:
     bc, bl = ctx.load("BC"), ctx.load("BC_LIGNES")
     bc = bc.loc[bc["Statut"].map(as_text).isin(BC_ACTIFS).astype(bool)].copy()
     bl = bl.loc[bl["ID_BC"].map(as_text).isin(set(bc["ID_BC"].map(as_text))).astype(bool)].copy()
-    bl["Cmd"] = bl["Quantité"].map(to_num)
-    bl["Liv"] = bl["Qté livrée"].map(to_num)
+    bl["Cmd"] = bl["Quantité"].map(to_num).astype(float)  # astype : série vide sans BC actif
+    bl["Liv"] = bl["Qté livrée"].map(to_num).astype(float)
     bl["Reste"] = (bl["Cmd"] - bl["Liv"]).clip(lower=0)
     pu = bl.apply(lambda r: montant_ligne(1, r["Prix unitaire HT"], r["Remise %"]), axis=1) if len(bl) else 0
     bl["HT cmd"] = bl["Cmd"] * pu
@@ -1003,23 +1334,33 @@ def onglet_validation_bc(ctx):
     if not len(bc):
         st.info("Aucun bon de commande.")
         return
-    k1, k2, k3 = st.columns(3)
-    k1.metric("BC à valider", int((bc["Statut"] == "Émis").sum()))
-    k2.metric("Montant à valider (TTC)",
-              f"{fmt_montant(bc.loc[bc['Statut'] == 'Émis', 'Total TTC'].map(to_num).sum())} F")
-    k3.metric("BC validés", int((bc["Statut"] == "Validé").sum()))
+    emis = bc.loc[bc["Statut"] == "Émis"]
+    al_emis = alertes_bc(ctx, set(emis["ID_BC"].map(as_text)))
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("BC à valider", len(emis))
+    k2.metric("Montant à valider (TTC)", f"{fmt_montant(emis['Total TTC'].map(to_num).sum())} F")
+    k3.metric("BC à valider avec alerte prix", sum(1 for x in al_emis.values() if x.startswith("🔴")),
+              help=f"Au moins un article payé plus de {prix.seuil(params(ctx)):g} % au-dessus de son prix moyen passé")
+    k4.metric("BC validés", int((bc["Statut"] == "Validé").sum()))
     f = _filtre_bc(ctx, bc, "vbc", defaut=["Émis"]).head(300)
     version = st.session_state.get("vbc_v", 0)
+    al = alertes_bc(ctx, set(f["ID_BC"].map(as_text)))
+    f = f.assign(**{"Écart prix": f["ID_BC"].map(lambda i: al.get(as_text(i), ""))})
+    f = f.iloc[f["Écart prix"].map(lambda x: 0 if x.startswith("🔴") else 1 if x.startswith("🟠") else 2)
+               .argsort(kind="stable")]
     v = _table_bc(f)
     v.insert(0, "✓", False)
     tout = st.checkbox("Tout cocher", key=f"vbc-tout-{version}")
     if tout:
         v["✓"] = True
     ed = st.data_editor(v[["✓", "ID_BC", "N° BC", "Date", "N° DA", "Chantier", "Fournisseur", "Total TTC (F)",
-                           "Statut", "Acheteur"]], hide_index=True, width="stretch",
+                           "Écart prix", "Statut", "Acheteur"]], hide_index=True, width="stretch",
                         key=f"vbc-ed-{version}-{tout}", disabled=["N° BC", "Date", "N° DA", "Chantier", "Fournisseur",
-                                                                    "Total TTC (F)", "Statut", "Acheteur"],
-                        column_config={"ID_BC": None, "✓": st.column_config.CheckboxColumn("✓", width="small")})
+                                                                    "Total TTC (F)", "Écart prix", "Statut", "Acheteur"],
+                        column_config={"ID_BC": None, "✓": st.column_config.CheckboxColumn("✓", width="small"),
+                                       "Écart prix": st.column_config.TextColumn(
+                                           "Écart prix", help="Écart maximal avec le prix moyen passé ; entre "
+                                                              "parenthèses, le nombre d'articles au-delà du seuil")})
     coches = ed.loc[ed["✓"].astype(bool)]
     n = len(coches)
     b1, b2, b3 = st.columns([1, 1, 2])
@@ -1153,10 +1494,21 @@ def onglet_parametres(ctx):
         ctx.refresh()
         st.rerun()
 
+    st.markdown("##### Base de prix (historique des achats)")
+    h = ctx.load("PRIX_HISTORIQUE")
+    st.caption(f"{len(h)} prix dans l'historique importé, plus les BC validés dans l'application. "
+               "Ces prix servent de référence (dernier, meilleur, moyen) dans la validation des DA, les TCP et les BC. "
+               "Importer un fichier Excel ayant les colonnes de l'onglet PRIX_HISTORIQUE ; les lignes déjà présentes "
+               "sont ignorées.")
+    fichier = st.file_uploader("Fichier Excel des prix", type=["xlsx"], key="prix-up")
+    if fichier is not None and st.button("Importer les prix", type="primary", key="prix-imp"):
+        with st.spinner("Import…"):
+            st.success(prix.importer(ctx, fichier))
+
 
 # =========================================================================== archivage annuel (admin)
 _ARCHIVE = {"DA": "Date DA", "HISTORIQUE_ARTICLES": "DA_Date", "TCP": "Date TCP", "TCP_OFFRES": "Date TCP",
-            "BC": "Date BC", "BC_LIGNES": "Date BC", "LIVRAISONS": "Date livraison"}
+            "BC": "Date BC", "BC_LIGNES": "Date BC", "LIVRAISONS": "Date livraison", "VALIDATIONS_DA": "Date"}
 
 
 def onglet_archivage(ctx):
@@ -1193,6 +1545,7 @@ def onglet_archivage(ctx):
     conf = st.text_input(f"Tapez {an} pour confirmer", key="arch-conf")
     if st.button(f"2. Retirer l'année {an} de la base", disabled=not (ok and conf.strip() == str(an)), key="arch-go"):
         with st.spinner("Archivage…"):
+            prix.archive_vers_historique(ctx, parts["BC"], parts["BC_LIGNES"])  # les prix restent en référence
             store = ctx.get_store()
             for t, df in restes.items():
                 if len(parts[t]):
@@ -1203,6 +1556,10 @@ def onglet_archivage(ctx):
 
 # =========================================================================== analyses achats
 def analyses_achats(ctx):
+    _analyses_achats(ctx)
+
+
+def _analyses_achats(ctx):
     bc, bl, tcp = ctx.load("BC"), ctx.load("BC_LIGNES"), ctx.load("TCP")
     st.markdown("#### Achats")
     if not len(bc):
@@ -1222,15 +1579,23 @@ def analyses_achats(ctx):
     k4.metric("DA validées à commander", len(da_ouvertes(ctx)))
 
     val["Mois"] = val["Date BC"].map(lambda v: (to_date(v) or date(1900, 1, 1)).strftime("%Y-%m"))
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("##### Montant HT par fournisseur")
-        st.dataframe(val.groupby("Fournisseur").agg(BC=("ID_BC", "size"), HT=("HT", "sum"))
-                     .sort_values("HT", ascending=False).assign(HT=lambda d: d["HT"].map(fmt_montant)), width="stretch")
-    with c2:
-        st.markdown("##### Montant HT par chantier et par mois")
-        pv = val.pivot_table(index="Chantier", columns="Mois", values="HT", aggfunc="sum", fill_value=0)
-        st.dataframe(pv.map(fmt_montant), width="stretch")
+    noms_ch = ctx.refs()["chantiers"]
+    mois = (val.assign(Chantier=val["Chantier"].map(lambda c: noms_ch.get(as_text(c), as_text(c))),
+                       **{"Montant HT": val["HT"]})
+            .groupby(["Mois", "Chantier"], as_index=False)["Montant HT"].sum())
+    graphs.empile_mois(mois, "Mois", "Chantier", "Montant HT", "Achats validés par mois et par chantier", "ach-mois",
+                       unite="F CFA")
+    pf_ = (val.groupby("Fournisseur").agg(**{"Montant HT": ("HT", "sum"), "BC": ("ID_BC", "size")})
+           .sort_values("Montant HT", ascending=False).reset_index())
+    graphs.barres(pf_, "Fournisseur", "Montant HT", "Principaux fournisseurs (montant HT validé)", "ach-four",
+                  unite="F CFA", infos=["BC"])
+    if len(blv):
+        art = ctx.load("ARTICLES")
+        fam = dict(zip(art["Code Article"].map(as_text), art["Famille"].map(as_text)))
+        pfam = (blv.assign(Famille=blv["Code Article"].map(lambda c: fam.get(as_text(c)) or "Hors catalogue"))
+                .groupby("Famille", as_index=False)["Montant"].sum().rename(columns={"Montant": "Montant HT"}))
+        graphs.barres(pfam, "Famille", "Montant HT", "Dépenses par famille d'articles (HT validé)", "ach-fam",
+                      unite="F CFA", top=12)
 
     st.markdown("##### Prix par article (BC validés)")
     if len(blv):
@@ -1248,8 +1613,12 @@ def analyses_achats(ctx):
         st.dataframe(aff.head(200), hide_index=True, width="stretch")
         if des:
             hist = blv.loc[blv["Désignation"] == des].sort_values("Date BC")
-            st.dataframe(hist[["Date BC", "N° BC", "Référence", "Fournisseur", "Qté", "Unité", "PU"]]
-                         .assign(PU=lambda d: d["PU"].map(fmt_montant)), hide_index=True, width="stretch")
+            h = hist.assign(Date=pd.to_datetime(hist["Date BC"].map(to_date)))
+            graphs.courbe(h.rename(columns={"PU": "Prix unitaire HT"}), "Date", "Prix unitaire HT",
+                          f"{des} : prix payés", "ach-pu", unite="F CFA",
+                          infos=["N° BC", "Fournisseur", "Référence"],
+                          table=hist[["Date BC", "N° BC", "Référence", "Fournisseur", "Qté", "Unité", "PU"]]
+                          .assign(PU=lambda d: d["PU"].map(fmt_montant)))
 
     # délai DA validée -> BC
     da = ctx.load("DA")
@@ -1284,6 +1653,12 @@ def analyses_achats(ctx):
         pf["Taux de service"] = (pf["Livré"] / pf["Commandé"]).map(lambda x: f"{x:.0%}" if x == x else "–")
         dmoy = sl.assign(F=sl["Fournisseur"].map(as_text)).groupby("F")["délai"].mean()
         pf["Délai moyen (j)"] = pf.index.map(lambda n: round(dmoy.get(n), 1) if n in dmoy and dmoy.get(n) == dmoy.get(n) else None)
+        pf["Taux"] = (pf["Livré"] / pf["Commandé"]).fillna(0)
+        tab = pf.drop(columns=["Taux"]).copy()
         for c in ("Commandé", "Livré", "Reliquat"):
-            pf[c] = pf[c].map(fmt_montant)
-        st.dataframe(pf.sort_values("BC", ascending=False), width="stretch")
+            tab[c] = tab[c].map(fmt_montant)
+        jauge = pd.DataFrame({"Fournisseur": pf.index, "Taux de service": pf["Taux"].values,
+                              "Commandé": pf["Commandé"].values}).sort_values("Commandé", ascending=False).head(15)
+        graphs.jauge_barres(jauge, "Fournisseur", "Taux de service",
+                            "Taux de service des fournisseurs (montant livré / commandé, 15 plus gros)", "ach-liv",
+                            table=tab.sort_values("BC", ascending=False).reset_index())
