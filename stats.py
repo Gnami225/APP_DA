@@ -13,11 +13,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import assistant
 import graphs
 from logic import as_text, fmt_montant, to_date, to_num
 from schema import LIGNE_BC_RETIREE
 
-SECTIONS = ["Vue d'ensemble", "ABC / XYZ", "Fournisseurs", "Prix", "Processus", "Contrôles (audit)"]
+SECTIONS = ["🤖 Assistant IA", "Vue d'ensemble", "ABC / XYZ", "Fournisseurs", "Prix", "Processus", "Contrôles (audit)"]
 HORS = "HORS CATALOGUE"
 
 
@@ -223,9 +224,11 @@ def onglet_statistiques(ctx):
     if not len(df):
         st.warning("Aucune ligne d'achat pour cette sélection.")
         return
-    sec = st.segmented_control("Section", SECTIONS, default=SECTIONS[0], key="sta-sec",
-                               label_visibility="collapsed") or SECTIONS[0]
-    {"Vue d'ensemble": _vue_ensemble, "ABC / XYZ": _vue_abc, "Fournisseurs": _vue_fournisseurs,
+    sec = st.segmented_control("Section", SECTIONS, default="Vue d'ensemble", key="sta-sec",
+                               label_visibility="collapsed") or "Vue d'ensemble"
+    {"🤖 Assistant IA": lambda d: assistant.ui(ctx, d, "sta-chat", "achats filtrés par la période et les filtres "
+                                                                    "ci-dessus, et toutes les DA"),
+     "Vue d'ensemble": _vue_ensemble, "ABC / XYZ": _vue_abc, "Fournisseurs": _vue_fournisseurs,
      "Prix": _vue_prix, "Processus": lambda d: _vue_processus(ctx, d),
      "Contrôles (audit)": lambda d: _vue_controles(d, df_tout)}[sec](df)
     st.divider()
@@ -328,6 +331,7 @@ def _pct(v) -> str:
 
 # --------------------------------------------------------------------------- vue d'ensemble
 def _vue_ensemble(df: pd.DataFrame):
+    assistant.commentaire(df, "sta-comm")
     bcs = _bcs(df)
     tot = df["montant"].sum()
     parts = df.groupby("four")["montant"].sum() / tot

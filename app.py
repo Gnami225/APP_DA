@@ -20,10 +20,14 @@ from logic import as_text, build_da, lignes_da, fmt_date, fmt_montant, is_true, 
 from pdf import build_pdf, find_logo
 import achats
 import catalogage
+import assistant
+import assistant_da
+import bl
+import ia
 import graphs
 import prix
 import stats
-from schema import (TABLES, ANCIENS_STATUTS, COLISAGES, DA_EN_ATTENTE, PRIORITES, ROLES, ROLES_ACHATS, ROLES_ADMIN,
+from schema import (TABLES, ANCIENS_STATUTS, COLISAGES, DA_EN_ATTENTE, PRIORITES, ROLES, ROLES_ACHATS, ROLES_ADMIN, ROLES_BL, ROLES_DA, CIVILITES,
                     ROLES_DG, ROLES_VALID_BC, ROLES_VALID_DA, STATUTS, STATUTS_LIGNE, LIGNE_BC_RETIREE)
 from storage import ExcelStore, GoogleSheetStore
 
@@ -138,6 +142,11 @@ def _services_pwc() -> bool:
     if manquants:
         store.append("SERVICES", manquants)
     achats.init_parametres(store)
+    us = store.read("UTILISATEURS")  # civilité préremplie à « M. » (à corriger pour les dames)
+    if "Civilité" in us.columns:
+        vides = {as_text(n): {"Civilité": "M."} for n, c in zip(us["Nom"], us["Civilité"]) if as_text(n) and not as_text(c)}
+        if vides:
+            store.update_many("UTILISATEURS", "Nom", vides)
     return True
 
 
@@ -177,7 +186,8 @@ def _load_all() -> dict:
         return {**m["statique"], **m["dynamique"]}
 
 
-_COLONNES_REQUISES = {"UTILISATEURS": ["Email", "Nom", "Rôle", "Chantier", "Service", "Actif", "PIN", "Poste"]}
+_COLONNES_REQUISES = {"UTILISATEURS": ["Email", "Nom", "Rôle", "Chantier", "Service", "Actif", "PIN", "Poste",
+                                        "Civilité"]}
 
 
 def load(table: str) -> pd.DataFrame:
@@ -260,7 +270,8 @@ def _secret_session() -> str:
 
 def _user_dict(nom: str) -> dict | None:
     if nom == ADMIN_SECOURS:
-        return {"Nom": "Administrateur", "Rôle": "Admin", "Email": "", "Chantier": "", "Service": "", "Poste": ""}
+        return {"Nom": "Administrateur", "Rôle": "Admin", "Email": "", "Chantier": "", "Service": "", "Poste": "",
+                "Civilité": ""}
     users = load("UTILISATEURS")
     r = users.loc[users["Nom"].map(as_text) == nom]
     if not len(r):
@@ -268,7 +279,7 @@ def _user_dict(nom: str) -> dict | None:
     r = r.iloc[0]
     if not (as_text(r["Actif"]) == "" or is_true(r["Actif"])):
         return None
-    u = {k: as_text(r[k]) for k in ["Nom", "Rôle", "Email", "Chantier", "Service", "Poste"]}
+    u = {k: as_text(r.get(k)) for k in ["Nom", "Rôle", "Email", "Chantier", "Service", "Poste", "Civilité"]}
     u["Rôle"] = u["Rôle"] if u["Rôle"] in ROLES else "Demandeur"
     return u
 
@@ -435,6 +446,8 @@ def detail_da(da: dict, key: str):
             st.dataframe(j.assign(Date=j["Date"].map(lambda v: as_text(v)[:16])), hide_index=True, width="stretch")
     st.download_button("Télécharger / imprimer la fiche PDF", pdf_de(da), file_name=pdf_name(da),
                        mime="application/pdf", key=f"pdf-{key}", type="primary")
+    import dossier
+    dossier.vue_dossier(contexte(st.session_state.user), as_text(da["ID_DA"]), f"dos-{key}")
 
 
 def choisir_da(df: pd.DataFrame, key: str) -> dict | None:
@@ -549,6 +562,73 @@ def choisir_article(prefix: str):
     return des, ref, code, col_def, [f"{prefix}-des", cle_ref]
 
 
+def _raz_ia_da():
+    for k in ("ia-da-lignes", "ia-da-err"):
+        st.session_state.pop(k, None)
+    st.session_state["ia-da-v"] = st.session_state.get("ia-da-v", 0) + 1
+
+
+def da_par_ia(parcs: list[str]):
+    """Saisie des articles en langage naturel (écrit ou dicté au micro du clavier du téléphone)."""
+    if not ia.disponible():
+        return
+    v = st.session_state.get("ia-da-v", 0)
+    with st.expander("🎙️ Décrire la demande en langage naturel — l'IA remplit les articles",
+                     expanded=not st.session_state.lignes):
+        st.caption("Écrivez ou dictez (touche 🎤 du clavier du téléphone), par exemple : « 4 pneus 315/80 R22.5 "
+                   "pour le camion 12, 2 filtres à gasoil de la niveleuse et 20 sacs de ciment pour le dallage ».")
+        txt = st.text_area("Besoin", key=f"ia-da-txt-{v}", height=100, label_visibility="collapsed",
+                           placeholder="Décrivez les articles, quantités, engins et usages…")
+        if st.button("✨ Analyser avec l'IA", key=f"ia-da-go-{v}", type="primary", disabled=not txt.strip()):
+            with st.spinner("L'IA analyse la demande et cherche les articles dans le catalogue…"):
+                try:
+                    st.session_state["ia-da-lignes"] = ia.analyser_besoin(
+                        txt, load("ARTICLES"), load("PARC"), COLISAGES, version_donnees())
+                    if not st.session_state["ia-da-lignes"]:
+                        st.warning("Aucun article reconnu : précisez la demande.")
+                except ia.IAErreur as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Analyse impossible : {e}")
+        props = st.session_state.get("ia-da-lignes")
+        if not props:
+            return
+        cat, refs_de = _catalogue(version_donnees())
+        t = pd.DataFrame(props)
+        t.insert(0, "Inclure", True)
+        cols = ["Inclure", "Statut", "Désignation", "Référence", "Colisage", "Quantité", "Code_Parc", "Usage",
+                "À vérifier"]
+        st.caption("Vérifiez et corrigez si besoin (désignation, référence, quantité, usage) puis ajoutez à la DA. "
+                   "🆕 = article absent du catalogue : il partira au catalogage.")
+        ed = st.data_editor(t[cols], hide_index=True, width="stretch", key=f"ia-da-ed-{v}",
+                            disabled=["Statut", "À vérifier"],
+                            column_config={
+                                "Inclure": st.column_config.CheckboxColumn("✓", width="small"),
+                                "Colisage": st.column_config.SelectboxColumn("Colisage", options=COLISAGES),
+                                "Quantité": st.column_config.NumberColumn("Quantité", min_value=0.0, format="%g"),
+                                "Code_Parc": st.column_config.TextColumn("Code parc"),
+                                "Usage": st.column_config.TextColumn("Usage (obligatoire)")})
+        garder = ed.loc[ed["Inclure"].astype(bool)]
+        a, b = st.columns(2)
+        if a.button(f"➕ Ajouter {len(garder)} article(s) à la DA", key=f"ia-da-add-{v}", type="primary",
+                    disabled=garder.empty):
+            manque = garder.loc[(garder["Usage"].map(as_text) == "") | (garder["Quantité"].fillna(0) <= 0)]
+            if len(manque):
+                st.error("Quantité et usage obligatoires pour chaque article coché.")
+                return
+            for _, l in garder.iterrows():
+                des = " ".join(as_text(l["Désignation"]).upper().split())
+                ref = " ".join(as_text(l["Référence"]).upper().split())
+                code = refs_de.get(des, {}).get(ref, "")  # recalcul : l'utilisateur a pu corriger
+                st.session_state.lignes.append({
+                    "Code Article": code, "Désignation": des, "Référence": ref,
+                    "Code_Parc": as_text(l["Code_Parc"]).upper(), "Colisage": as_text(l["Colisage"]) or "Unité",
+                    "Quantité": float(l["Quantité"]), "Usage": as_text(l["Usage"])})
+            _raz_ia_da()
+            st.rerun()
+        b.button("Effacer", key=f"ia-da-raz-{v}", on_click=_raz_ia_da)
+
+
 @st.cache_resource(show_spinner=False, max_entries=2)
 def _catalogue(version: int) -> tuple[dict, dict]:
     """Catalogue calculé une fois par version des données (et non à chaque clic)."""
@@ -591,10 +671,17 @@ def onglet_nouvelle(user: dict):
         st.error("Renseignez les onglets CHANTIERS et SERVICES de la base.")
         return
 
+    ctx = contexte(user)
+    assistant_da.appliquer_entete()  # valeurs dictées à l'assistant (avant la création des champs)
+    assistant_da.panneau(ctx, user, nb_a_valider(user) if user["Rôle"] in ROLES_VALID_DA else 0)
+    for k, v in (("da-ch", user["Chantier"] if user["Chantier"] in codes_ch else codes_ch[0]),
+                 ("da-prio", PRIORITES[0]), ("da-besoin", None), ("da-obs", "")):
+        if k not in st.session_state or (k == "da-ch" and st.session_state[k] not in codes_ch):
+            st.session_state[k] = v
+
     st.markdown("##### En-tête")
     c1, c2 = st.columns(2)
-    chantier = c1.selectbox("Chantier", codes_ch, format_func=lambda c: r["chantiers"].get(c, c),
-                            index=codes_ch.index(user["Chantier"]) if user["Chantier"] in codes_ch else 0)
+    chantier = c1.selectbox("Chantier", codes_ch, format_func=lambda c: r["chantiers"].get(c, c), key="da-ch")
     date_da = c2.date_input("Date", value=date.today(), format="DD/MM/YYYY")
     c1, c2 = st.columns(2)
     service = c1.selectbox("Service demandeur", codes_sv, format_func=lambda c: r["services"].get(c, c),
@@ -606,13 +693,14 @@ def onglet_nouvelle(user: dict):
     demandeur = c1.text_input("Demandeur", value=user["Nom"])
     code_da = c2.text_input("Code DA (facultatif)")
     c1, c2 = st.columns(2)
-    priorite = c1.selectbox("Priorité", PRIORITES)
-    date_besoin = c2.date_input("Date de besoin", value=None, format="DD/MM/YYYY")
-    observations = st.text_area("Observations", height=68)
+    priorite = c1.selectbox("Priorité", PRIORITES, key="da-prio")
+    date_besoin = c2.date_input("Date de besoin", format="DD/MM/YYYY", key="da-besoin")
+    observations = st.text_area("Observations", height=68, key="da-obs")
 
     st.markdown("##### Articles")
     hist = load("HISTORIQUE_ARTICLES")
     parcs = sorted((set(load("PARC")["Code_Parc"].map(as_text)) | set(hist["Code_Parc"].map(as_text))) - {""})
+    da_par_ia(parcs)
     des, ref, code, col_def, (_, cle_ref) = choisir_article("art")
 
     with st.form(f"ajout-{des or ''}-{ref}", clear_on_submit=True):
@@ -643,6 +731,8 @@ def onglet_nouvelle(user: dict):
             st.session_state.lignes.pop(i)
             st.rerun()
 
+    for c in assistant_da.conseils(ctx, st.session_state.lignes, priorite, date_besoin):
+        st.info(f"💡 {c}")
     n = len(st.session_state.lignes)
     if st.button(f"Soumettre la DA ({n} article{'s' if n > 1 else ''})", type="primary", disabled=n == 0):
         if not demandeur.strip() or not responsable.strip():
@@ -685,6 +775,8 @@ def onglet_nouvelle(user: dict):
             except Exception as exc:  # l'envoi ne doit jamais bloquer la DA
                 mail = f"DA enregistrée, mais l'email n'a pas pu partir ({exc})."
         st.session_state.lignes = []
+        for k in ("da-prio", "da-besoin", "da-obs", "conv", "conv_fini", "conv-vu", "ada-mode"):
+            st.session_state.pop(k, None)
         st.session_state.last_submit = {"numero": da_row["N° DA"], "pdf": pdf, "mail": mail, "suite": suite}
         st.rerun()
 
@@ -992,6 +1084,8 @@ def onglet_validation_da(user: dict):
     b1, b2, b3 = st.columns([1, 1, 2])
     motif = b3.text_input("Motif", key=f"vda-motif-{version}", label_visibility="collapsed",
                           placeholder="Motif du rejet (obligatoire pour rejeter)")
+    with b3:
+        ia.bouton_reformuler(f"vda-motif-{version}", "Rejet de demandes d'achat par le validateur", "vda-ref")
     go = None
     if b1.button(f"✅ Valider ({n})", disabled=n == 0, type="primary", width="stretch", key="vda-ok"):
         go = True
@@ -1024,6 +1118,9 @@ def onglet_validation_da(user: dict):
     c1, c2, c3 = st.columns([1, 1, 2])
     m1 = c3.text_input("Motif", key=f"vda-m1-{id_da}", label_visibility="collapsed",
                        placeholder="Motif du rejet (obligatoire pour rejeter)")
+    with c3:
+        ia.bouton_reformuler(f"vda-m1-{id_da}", f"Rejet de la DA {as_text(d.get('N° DA'))} ; articles : "
+                             + ", ".join(t["Désignation"].head(15).map(as_text)) if len(t) else "", f"vda-ref1-{id_da}")
     un = None
     if c1.button("✅ Valider cette DA", type="primary", width="stretch", key=f"vda-ok1-{id_da}"):
         un = True
@@ -1123,6 +1220,8 @@ def onglet_admin_da(user: dict):
     b1, b2, b3, b4 = st.columns([1, 1, 1, 2])
     motif = b4.text_input("Motif (obligatoire pour rejeter)", key=f"adm-motif-{version}",
                           label_visibility="collapsed", placeholder="Motif du rejet (obligatoire pour rejeter)")
+    with b4:
+        ia.bouton_reformuler(f"adm-motif-{version}", "Rejet de demandes d'achat par l'administration", "adm-ref")
     action = None
     if b1.button(f"✅ Valider DG ({n})", disabled=n == 0, type="primary", width="stretch", key="adm-ok"):
         action = "Validée DG"
@@ -1268,7 +1367,7 @@ def _creer_acces(personnes: list[dict]) -> tuple[list[str], list[str]]:
             "Direction" if poste in ("Direction générale", "Direction d'exploitation") else "Demandeur")
         rows.append({"Email": p.get("Email", ""), "Nom": nom, "Rôle": role,
                      "Chantier": p.get("Chantier", ""), "Service": p.get("Service", ""),
-                     "Actif": "TRUE", "PIN": code, "Poste": p["Poste"].strip()})
+                     "Actif": "TRUE", "PIN": code, "Poste": p["Poste"].strip(), "Civilité": "M."})
         lignes.append(ligne_txt(nom, p["Poste"].strip(), code))
     if rows:
         get_store().append("UTILISATEURS", rows)
@@ -1349,7 +1448,7 @@ def onglet_acces(user: dict):
     if not len(users):
         st.info("Aucun utilisateur.")
         return
-    cols = ["Nom", "Poste", "Rôle", "Chantier", "Service", "Actif", "Email", "PIN"]
+    cols = ["Civilité", "Nom", "Poste", "Rôle", "Chantier", "Service", "Actif", "Email", "PIN"]
     vue = users[cols].copy()
     for c in cols:
         vue[c] = vue[c].map(as_text)
@@ -1360,6 +1459,8 @@ def onglet_acces(user: dict):
         vue, hide_index=True, width="stretch", key=f"acc-ed-{version}",
         disabled=["Nom", "PIN", "Service"],
         column_config={
+            "Civilité": st.column_config.SelectboxColumn(options=CIVILITES, width="small",
+                                                         help="Pour l'accueil : « Bonjour M. Koné »"),
             "Poste": st.column_config.SelectboxColumn(options=postes),
             "Rôle": st.column_config.SelectboxColumn(options=ROLES, required=True,
                                                      help="Chef de service : vise les DA de son service (un seul par "
@@ -1376,7 +1477,7 @@ def onglet_acces(user: dict):
         changes = {}
         for n in apres.index:
             diff = {}
-            for c in ["Poste", "Rôle", "Chantier", "Email"]:
+            for c in ["Civilité", "Poste", "Rôle", "Chantier", "Email"]:
                 if as_text(apres.at[n, c]) != as_text(avant.at[n, c]):
                     diff[c] = as_text(apres.at[n, c])
             if diff.get("Poste") in POSTES:
@@ -1416,9 +1517,13 @@ def onglet_acces(user: dict):
 
 def onglet_analyses(ctx=None):
     # un seul volet calculé à la fois (des onglets imbriqués calculeraient les deux à chaque affichage)
-    vue = st.segmented_control("Analyse", ["Demandes d'achat", "Achats", "Prix"], default="Demandes d'achat",
+    vues = ["Demandes d'achat", "Achats", "Prix"] + (["🤖 Assistant IA"] if ia.disponible() else [])
+    vue = st.segmented_control("Analyse", vues, default="Demandes d'achat",
                                key="an-vue", label_visibility="collapsed") or "Demandes d'achat"
-    if vue == "Achats":
+    if vue == "🤖 Assistant IA":
+        df = stats.base(ctx)
+        assistant.ui(ctx, df.loc[~df["aberrant"]] if len(df) else None, "an-chat", "tous les achats et toutes les DA")
+    elif vue == "Achats":
         achats.analyses_achats(ctx)
     elif vue == "Prix":
         prix.vue_evolution(ctx)
@@ -1516,7 +1621,7 @@ def _fragment(fn, nom: str):
 def contexte(user: dict):
     from types import SimpleNamespace
     return SimpleNamespace(load=load, refresh=refresh, get_store=get_store, refs=refs, picker=choisir_article,
-                           user=user, fragment=_fragment, version=version_donnees)
+                           user=user, fragment=_fragment, version=version_donnees, secret=_secret)
 
 
 def bloquer_traduction():
@@ -1571,12 +1676,16 @@ def main():
     role = user["Rôle"]
     ctx = contexte(user)
     # l'acheteur ne saisit pas de DA : il consulte les DA et fait les TCP et les BC (onglet Achats)
-    onglets = {} if role == "Acheteur" else {"Nouvelle DA": lambda: onglet_nouvelle(user),
-                                             "Mes DA": lambda: onglet_mes_da(user)}
+    # saisie des DA : administrateurs, chefs de service et demandeurs (N-1) ; l'acheteur et la direction n'en
+    # saisissent pas (achats, validations, analyses)
+    onglets = {"Nouvelle DA": lambda: onglet_nouvelle(user),
+               "Mes DA": lambda: onglet_mes_da(user)} if role in ROLES_DA else {}
     if role in ROLES_VALID_DA:  # libellé fixe : un libellé qui change ferait revenir sur le premier onglet
         onglets["Validation DA"] = lambda: onglet_validation_da(user)
     if role in ROLES_ACHATS:
         onglets["Achats"] = lambda: achats.onglet_achats(ctx)
+    if role in ROLES_BL:
+        onglets["Réception BL"] = lambda: bl.onglet_bl(ctx)
     if role in ROLES_VALID_BC:
         onglets["Validation BC"] = lambda: achats.onglet_validation_bc(ctx)
     if admin:

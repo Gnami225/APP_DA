@@ -3,7 +3,8 @@
 Principes :
 - prix NET (après remise), comparé seulement dans la même unité ;
 - valeurs aberrantes écartées (moins de la moitié ou plus du double du prix médian, dès 3 achats) ;
-- repères : dernier prix, meilleur prix sur 12 mois, prix moyen pondéré par les quantités, nombre d'achats ;
+- repères sur tout l'historique : dernier prix, meilleur prix, prix moyen pondéré par les quantités,
+  nombre d'achats ; en complément le meilleur prix des 12 derniers mois ;
 - familles « non comparables » (transport, frais, réparations, locations) : prix indicatifs, sans alerte.
 """
 from __future__ import annotations
@@ -83,21 +84,24 @@ def base_prix(ctx) -> pd.DataFrame:
 
 
 def _stats(g: pd.DataFrame, debut: date) -> dict:
+    """Repères sur TOUT l'historique (valeurs aberrantes écartées) + meilleur prix des 12 derniers mois."""
     g = g.sort_values("date")
     n_total = len(g)
     if n_total >= 3:  # écarte les erreurs de saisie / unités différentes
         med = g["pu"].median()
         g = g.loc[(g["pu"] >= med / 2) & (g["pu"] <= med * 2)]
     recents = g.loc[g["date"] >= debut]
-    fen = recents if len(recents) else g
-    poids = fen["q"].where(fen["q"] > 0, 1.0)
-    best = fen.loc[fen["pu"].idxmin()]
+    poids = g["q"].where(g["q"] > 0, 1.0)
+    best = g.loc[g["pu"].idxmin()]
     last = g.iloc[-1]
+    b12 = recents.loc[recents["pu"].idxmin()] if len(recents) else None
     return {"n": len(g), "n_total": n_total, "ecartes": n_total - len(g), "recent": bool(len(recents)),
-            "moyenne": float((fen["pu"] * poids).sum() / poids.sum()),
+            "moyenne": float((g["pu"] * poids).sum() / poids.sum()),
             "meilleur": float(best["pu"]), "meilleur_four": best["four"], "meilleur_date": best["date"],
+            "meilleur_12": float(b12["pu"]) if b12 is not None else None,
+            "meilleur_12_four": b12["four"] if b12 is not None else "",
             "dernier": float(last["pu"]), "dernier_four": last["four"], "dernier_date": last["date"],
-            "unite": as_text(last["unite"])}
+            "premier_date": g.iloc[0]["date"], "unite": as_text(last["unite"])}
 
 
 @st.cache_resource(show_spinner=False, max_entries=2)
@@ -168,16 +172,20 @@ def fmt_ecart(e: float | None, niv: str) -> str:
 
 
 def colonnes_ref(s: dict | None) -> dict:
-    """Textes courts pour les tableaux : dernier, meilleur 12 mois, moyenne, nb d'achats."""
+    """Textes courts pour les tableaux : dernier prix, meilleur prix (tout l'historique), meilleur des 12 derniers
+    mois, prix moyen pondéré (tout l'historique), nombre d'achats et période couverte."""
     if not s:
-        return {"Dernier prix": "", "Meilleur prix": "", "Prix moyen": "", "Achats": ""}
+        return {"Dernier prix": "", "Meilleur prix": "", "Meilleur 12 mois": "", "Prix moyen": "", "Achats": ""}
     suf = f" /{s['unite']}" if s.get("autre_unite") else ""
     ind = " (indicatif)" if s.get("indicatif") else ""
-    return {"Dernier prix": f"{fmt_montant(s['dernier'])}{suf} · {fmt_date(s['dernier_date'])}",
-            "Meilleur prix": f"{fmt_montant(s['meilleur'])}{suf} · {s['meilleur_four'][:18]}"
-                             + ("" if s["recent"] else " (> 12 mois)"),
+    return {"Dernier prix": f"{fmt_montant(s['dernier'])}{suf} · {fmt_date(s['dernier_date'])} · "
+                            f"{as_text(s['dernier_four'])[:16]}",
+            "Meilleur prix": f"{fmt_montant(s['meilleur'])}{suf} · {as_text(s['meilleur_four'])[:16]} · "
+                             f"{fmt_date(s['meilleur_date'])}",
+            "Meilleur 12 mois": (f"{fmt_montant(s['meilleur_12'])}{suf} · {as_text(s['meilleur_12_four'])[:16]}"
+                                 if s.get("meilleur_12") else "aucun achat"),
             "Prix moyen": f"{fmt_montant(s['moyenne'])}{suf}{ind}",
-            "Achats": f"{s['n']}" + (" ⚠" if s["n"] == 1 else "")}
+            "Achats": f"{s['n']} depuis {fmt_date(s['premier_date'])[-7:]}" + (" ⚠" if s["n"] == 1 else "")}
 
 
 def controle_lignes(ctx, lignes: list[dict], seuil_pct: float) -> pd.DataFrame:
@@ -274,13 +282,15 @@ def vue_evolution(ctx):
     for u, gu in g.groupby("unite"):
         s = ref_article(ctx, gu["code"].iloc[0], gu["des"].iloc[0], gu["ref"].iloc[0], u)
         if s:
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric(f"Dernier prix ({u})", f"{fmt_montant(s['dernier'])} F", help=f"{s['dernier_four']} · "
                                                                                   f"{fmt_date(s['dernier_date'])}")
-            c2.metric("Meilleur prix 12 mois" if s["recent"] else "Meilleur prix", f"{fmt_montant(s['meilleur'])} F",
+            c2.metric("Meilleur prix (historique)", f"{fmt_montant(s['meilleur'])} F",
                       help=f"{s['meilleur_four']} · {fmt_date(s['meilleur_date'])}")
-            c3.metric("Prix moyen pondéré", f"{fmt_montant(s['moyenne'])} F")
-            c4.metric("Achats retenus", f"{s['n']}/{s['n_total']}",
+            c3.metric("Meilleur prix 12 mois", f"{fmt_montant(s['meilleur_12'])} F" if s.get("meilleur_12") else "–",
+                      help=s.get("meilleur_12_four") or "aucun achat sur les 12 derniers mois")
+            c4.metric("Prix moyen pondéré (historique)", f"{fmt_montant(s['moyenne'])} F")
+            c5.metric("Achats retenus", f"{s['n']}/{s['n_total']}",
                       help="Prix aberrants écartés du calcul (moins de la moitié ou plus du double du prix médian)")
         gc = gu.assign(Date=pd.to_datetime(gu["date"]), **{"P.U. net HT": gu["pu"], "N° BC": gu["bc"],
                                                             "Fournisseur": gu["four"]})

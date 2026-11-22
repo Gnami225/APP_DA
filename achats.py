@@ -19,6 +19,7 @@ from logic import (as_text, fmt_date, fmt_montant, maintenant, montant_ligne, ne
 from pdf import build_bc_pdf, build_tcp_pdf
 from schema import COLISAGES, CONDITIONS_DEFAUT, LIGNE_BC_RETIREE, PARAMETRES_DEFAUT, ROLES_ACHATS, STATUTS_BC, TABLES
 import graphs
+import ia
 import prix
 
 BC_ACTIFS = {"Émis", "Validé"}  # un BC rejeté ou annulé libère les quantités de la DA
@@ -159,9 +160,13 @@ def maj_lignes_da(ctx, ids_lignes: set[str]):
 
 # =========================================================================== onglet Achats
 def onglet_achats(ctx):
-    vues = {"Demandes d'achat (DA)": _vue_da, "Tableaux comparatifs (TCP)": _vue_tcp, "Bons de commande": _vue_bc}
-    if ctx.user["Rôle"] != "Acheteur":  # acheteur : DA, TCP et BC uniquement
+    import pilotage
+    import sourcing
+    vues = {"📋 À faire": pilotage.vue_a_faire, "Demandes d'achat (DA)": _vue_da, "🔎 Sourcing": sourcing.vue_sourcing,
+            "Tableaux comparatifs (TCP)": _vue_tcp, "Bons de commande": _vue_bc}
+    if ctx.user["Rôle"] != "Acheteur":  # acheteur : DA, sourcing, TCP et BC
         vues.update({"Suivi livraisons": onglet_livraisons, "Fournisseurs": _vue_fournisseurs})
+    vues["⭐ Notes fournisseurs"] = sourcing.vue_notes
     for i, (tab, fn) in enumerate(zip(st.tabs(list(vues)), vues.values())):
         with tab:
             ctx.fragment(lambda fn=fn: fn(ctx), f"achats-{i}")
@@ -216,9 +221,56 @@ def _vue_da(ctx):
         st.dataframe(l[["N° Ligne", "Désignation", "Référence", "Code_Parc", "Colisage", "Qté DA",
                         "Qté commandée", "Reste à commander", "BC", "Statut ligne"]],
                      hide_index=True, width="stretch")
+        import dossier
+        dossier.vue_dossier(ctx, id_da, "ach")
 
 
 # --------------------------------------------------------------------------- TCP
+def _attendues(lignes: pd.DataFrame, col_id: str, col_q: str, col_u: str) -> list[dict]:
+    return [{"id": as_text(i), "designation": as_text(d), "reference": as_text(r), "quantite": float(to_num(q) or 0),
+             "unite": as_text(u)} for i, d, r, q, u in zip(lignes[col_id], lignes["Désignation"], lignes["Référence"],
+                                                           lignes[col_q], lignes[col_u])]
+
+
+def _lecture_tcp(da, lignes: pd.DataFrame, noms: list[str]) -> tuple[list[dict], str]:
+    """Lecture IA des devis : un document par fournisseur -> prix unitaires nets (remise déduite)."""
+    lus = [{} for _ in noms]
+    if ia.disponible():
+        j = st.selectbox("📷 Devis à lire avec l'IA — fournisseur", range(len(noms)), format_func=lambda x: noms[x],
+                         key=f"tcp-ia-four-{da['_id']}")
+        ia.ui_lecture(f"tcp-ia-{da['_id']}-{noms[j]}", _attendues(lignes, "_id", "Reste à commander", "Colisage"),
+                      f"le devis de {noms[j]}")
+    vers = []
+    for j, n in enumerate(noms):
+        cle = f"tcp-ia-{da['_id']}-{n}"
+        for i, l in (st.session_state.get(cle) or {}).items():
+            pu = to_num(l.get("prix_unitaire_ht"))
+            if pu:
+                lus[j][i] = round(pu * (1 - (to_num(l.get("remise_pct")) or 0) / 100), 2)
+        vers.append(str(st.session_state.get(f"{cle}-v", 0)))
+    return lus, ".".join(vers)
+
+
+def _relance(ctx, b, g: pd.DataFrame):
+    """Email de relance fournisseur rédigé par l'IA pour le reste à livrer."""
+    reste = g.loc[g["Reste"] > 1e-9]
+    if not ia.disponible() or reste.empty:
+        return
+    cle = f"relance-{as_text(b['ID_BC'])}"
+    if st.button("✉️ Rédiger une relance fournisseur (IA)", key=f"{cle}-go"):
+        with st.spinner("Rédaction…"):
+            try:
+                st.session_state[cle] = ia.relance_fournisseur(
+                    {"numero": as_text(b["N° BC"]), "date": fmt_date(b["Date BC"]),
+                     "fournisseur": as_text(b["Fournisseur"]), "chantier": as_text(b.get("Chantier"))},
+                    reste[["Désignation", "Référence", "Unité", "Commandé", "Déjà livré", "Reste"]].to_dict("records"),
+                    f"{ctx.user['Nom']}, service Achats PWC")
+            except ia.IAErreur as e:
+                st.error(str(e))
+    if st.session_state.get(cle):
+        st.text_area("Relance (à copier dans votre messagerie)", st.session_state[cle], height=260, key=f"{cle}-txt")
+
+
 def _vue_tcp(ctx):
     if st.session_state.get("tcp_ok"):
         ok = st.session_state["tcp_ok"]
@@ -248,8 +300,9 @@ def _vue_tcp(ctx):
         return
     sl = suivi_lignes(ctx)
     lignes = sl.loc[(sl["ID_DA"].map(as_text) == da["_id"]) & (sl["Reste à commander"] > 0)].sort_values("N° Ligne")
-    nf = int(st.number_input("Nombre de fournisseurs consultés", min_value=1, max_value=12, value=3, step=1,
-                             key="tcp-nf"))
+    if "tcp-nf" not in st.session_state:
+        st.session_state["tcp-nf"] = 3
+    nf = int(st.number_input("Nombre de fournisseurs consultés", min_value=1, max_value=12, step=1, key="tcp-nf"))
     conds, fours = conditions(ctx), fournisseurs(ctx)
     offres = []
     par_ligne = min(nf, 4)
@@ -283,18 +336,22 @@ def _vue_tcp(ctx):
         "Inclure": True, "ID": lignes["_id"].values, "Désignation": lignes["Désignation"].map(as_text).values,
         "Référence": lignes["Référence"].map(as_text).values, "Unité": lignes["Colisage"].map(as_text).values,
         "Quantité": lignes["Reste à commander"].values,
+        "Dernier prix": [prix.colonnes_ref(x)["Dernier prix"] for x in refs_l],
         "Meilleur prix passé": [prix.colonnes_ref(x)["Meilleur prix"] for x in refs_l],
+        "Meilleur 12 mois": [prix.colonnes_ref(x)["Meilleur 12 mois"] for x in refs_l],
         "Prix moyen passé": [prix.colonnes_ref(x)["Prix moyen"] for x in refs_l]})
     ref_de = dict(zip(lignes["_id"], refs_l))
+    lus, vers = _lecture_tcp(da, lignes, noms)
     for j in range(nf):
-        grille[f"PU{j}"] = None
+        grille[f"PU{j}"] = [lus[j].get(i) for i in lignes["_id"]]
     cfg = {"ID": None, "Inclure": st.column_config.CheckboxColumn("✓", width="small"),
            "Quantité": st.column_config.NumberColumn(min_value=0.0, format="%.2f")}
     for j, n in enumerate(noms):
         cfg[f"PU{j}"] = st.column_config.NumberColumn(n, min_value=0.0, step=1.0, format="%.0f")
     ed = st.data_editor(grille, hide_index=True, width="stretch", column_config=cfg,
-                        disabled=["Désignation", "Référence", "Unité", "Meilleur prix passé", "Prix moyen passé"],
-                        key=f"tcp-grille-{da['_id']}-{'|'.join(noms)}")
+                        disabled=["Désignation", "Référence", "Unité", "Dernier prix", "Meilleur prix passé",
+                                  "Meilleur 12 mois", "Prix moyen passé"],
+                        key=f"tcp-grille-{da['_id']}-{'|'.join(noms)}-{vers}")
     ed = ed.loc[ed["Inclure"].astype(bool) & (ed["Quantité"].map(to_num) > 0)].reset_index(drop=True)
     if not len(ed):
         st.warning("Aucun article inclus.")
@@ -322,7 +379,7 @@ def _vue_tcp(ctx):
                                                                           "Meilleur prix"],
                         column_config={"Retenu": st.column_config.SelectboxColumn("Fournisseur retenu", options=noms)},
                         key=f"tcp-choix-{da['_id']}-{empreinte}")
-    retenus = [as_text(x) for x in ch["Retenu"]]
+    retenus = [as_text(x) if as_text(x) in noms else "" for x in ch["Retenu"]]
     sans_prix = [ed.at[i, "Désignation"] for i, n in enumerate(retenus) if n and pu.at[i, n] <= 0]
     if sans_prix:
         st.error("Le fournisseur retenu n'a pas chiffré : " + ", ".join(sans_prix))
@@ -711,15 +768,26 @@ def _vue_bc(ctx):
         "Unité": lignes["Colisage"].map(as_text).values, "Reste DA": lignes["Reste à commander"].values,
         "Quantité": lignes["Reste à commander"].values,
         "Prix unitaire HT": [prix_tcp.get(i) for i in lignes["_id"]], "Remise %": 0.0, "TVA %": taux})
+    cle_ia = f"bc-ia-{k}"
+    lu = ia.ui_lecture(cle_ia, _attendues(lignes, "_id", "Reste à commander", "Colisage"),
+                       "le devis / la proforma du fournisseur") or {}
+    if lu:
+        for c, champ in (("Prix unitaire HT", "prix_unitaire_ht"), ("Remise %", "remise_pct"), ("TVA %", "tva_pct"),
+                         ("Quantité", "quantite")):
+            grille[c] = [to_num(lu[i][champ]) if i in lu and lu[i].get(champ) not in (None, "") else v
+                         for i, v in zip(lignes["_id"], grille[c])]
     refs_l = [prix.colonnes_ref(prix.ref_article(ctx, l["Code Article"], l["Désignation"], l["Référence"],
                                                  l["Colisage"])) for _, l in lignes.iterrows()]
+    grille.insert(grille.columns.get_loc("Prix unitaire HT"), "Dernier prix", [x["Dernier prix"] for x in refs_l])
     grille.insert(grille.columns.get_loc("Prix unitaire HT"), "Meilleur prix passé", [x["Meilleur prix"] for x in refs_l])
+    grille.insert(grille.columns.get_loc("Prix unitaire HT"), "Meilleur 12 mois", [x["Meilleur 12 mois"] for x in refs_l])
     grille.insert(grille.columns.get_loc("Prix unitaire HT"), "Prix moyen passé", [x["Prix moyen"] for x in refs_l])
     if t:  # seules les lignes attribuées à ce fournisseur dans le TCP sont cochées
         grille["Inclure"] = grille["ID"].map(lambda i: i in prix_tcp)
     ed = st.data_editor(
-        grille, hide_index=True, width="stretch", key=f"bc-grille-{k}",
-        disabled=["Désignation", "Reste DA", "Meilleur prix passé", "Prix moyen passé"],
+        grille, hide_index=True, width="stretch", key=f"bc-grille-{k}-{st.session_state.get(cle_ia + '-v', 0)}",
+        disabled=["Désignation", "Reste DA", "Dernier prix", "Meilleur prix passé", "Meilleur 12 mois",
+                  "Prix moyen passé"],
         column_config={"ID": None, "Code Article": None,
                        "Inclure": st.column_config.CheckboxColumn("✓", width="small"),
                        "Unité": st.column_config.SelectboxColumn(options=sorted(set(COLISAGES) | set(grille["Unité"]))),
@@ -1279,7 +1347,15 @@ def _reception_bc(ctx, b, lignes: pd.DataFrame, version: int):
                       "Référence": lg["Référence"].map(as_text).values, "Unité": lg["Unité"].map(as_text).values,
                       "Commandé": lg["Cmd"].values, "Déjà livré": lg["Liv"].values, "Reste": lg["Reste"].values,
                       "Qté reçue": lg["Reste"].values if remplir else 0.0})
-    ed = st.data_editor(g, hide_index=True, width="stretch", key=f"liv-rec-{idb}-{version}-{remplir}",
+    cle_ia = f"liv-ia-{idb}"
+    lu = ia.ui_lecture(cle_ia, [{"id": i, "designation": d, "reference": r, "quantite_restante": float(q), "unite": u}
+                                for i, d, r, q, u in zip(g["ID"], g["Désignation"], g["Référence"], g["Reste"],
+                                                         g["Unité"])], "le bon de livraison") or {}
+    if lu:
+        g["Qté reçue"] = [to_num(lu[i].get("quantite")) if i in lu and lu[i].get("quantite") is not None else v
+                          for i, v in zip(g["ID"], g["Qté reçue"])]
+    ed = st.data_editor(g, hide_index=True, width="stretch",
+                        key=f"liv-rec-{idb}-{version}-{remplir}-{st.session_state.get(cle_ia + '-v', 0)}",
                         disabled=["Désignation", "Référence", "Unité", "Commandé", "Déjà livré", "Reste"],
                         column_config={"ID": None,
                                        "Qté reçue": st.column_config.NumberColumn(min_value=0.0, format="%.2f",
@@ -1306,6 +1382,7 @@ def _reception_bc(ctx, b, lignes: pd.DataFrame, version: int):
             st.session_state.liv_msg = f"Réception enregistrée sur {as_text(b['N° BC'])} ({len(rows)} ligne(s))."
             st.rerun()
 
+    _relance(ctx, b, g)
     hist = ctx.load("LIVRAISONS")
     hist = hist.loc[hist["ID_BC"].map(as_text) == idb].sort_values("Créé le")
     if len(hist):
@@ -1368,6 +1445,8 @@ def onglet_validation_bc(ctx):
     b1, b2, b3 = st.columns([1, 1, 2])
     motif = b3.text_input("Motif", key=f"vbc-motif-{version}", label_visibility="collapsed",
                           placeholder="Motif du rejet (obligatoire pour rejeter)")
+    with b3:
+        ia.bouton_reformuler(f"vbc-motif-{version}", "Rejet de bons de commande par la direction", "vbc-ref")
     action = None
     if b1.button(f"✅ Valider ({n})", disabled=n == 0, type="primary", key="vbc-ok"):
         action = "Validé"
@@ -1522,8 +1601,51 @@ _ARCHIVE = {"DA": "Date DA", "HISTORIQUE_ARTICLES": "DA_Date", "TCP": "Date TCP"
             "BC": "Date BC", "BC_LIGNES": "Date BC", "LIVRAISONS": "Date livraison", "VALIDATIONS_DA": "Date"}
 
 
+def _nouveaux_articles(ctx, xl: dict) -> tuple[dict[str, str], int]:
+    """Onglet « NOUVEAUX ARTICLES » du fichier de reprise : crée dans le catalogue les articles absents (code
+    définitif attribué ici, selon la famille) et renvoie la table « DÉSIGNATION|RÉFÉRENCE » -> code."""
+    import catalogage
+    feuille = next((xl[k] for k in xl if k.strip().upper() in ("NOUVEAUX ARTICLES", "ARTICLES_NOUVEAUX")), None)
+    art = ctx.get_store().read("ARTICLES")
+    index = catalogage.index_catalogue(art)
+    if feuille is None or not len(feuille):
+        return index, 0
+    feuille = feuille.astype(object).where(feuille.notna(), "")
+    crees, deja = [], set()
+    for _, r in feuille.iterrows():
+        des, ref = catalogage._norm(r.get("Désignation")), catalogage._norm(r.get("Référence"))
+        cle = f"{des}|{ref}"
+        if not des or cle in index:
+            continue
+        fam = as_text(r.get("Famille")) or "DIVERS"
+        code = catalogage.nouveau_code(art, fam, deja)
+        deja.add(code)
+        index[cle] = code
+        crees.append({"Code Article": code, "Désignation": des, "Référence": ref, "Famille": fam,
+                      "Colisage": as_text(r.get("Colisage")) or "Unité", "Sous-famille": ""})
+    if crees:
+        ctx.get_store().append("ARTICLES", crees)
+    return index, len(crees)
+
+
+def _coder_lignes(lignes: list[dict], index: dict[str, str]) -> int:
+    """Met le code catalogue sur les lignes de BC qui n'en ont pas (par désignation + référence)."""
+    import catalogage
+    n = 0
+    for r in lignes:
+        if not as_text(r.get("Code Article")):
+            code = index.get(f"{catalogage._norm(r.get('Désignation'))}|{catalogage._norm(r.get('Référence'))}")
+            if code:
+                r["Code Article"] = code
+                n += 1
+    return n
+
+
 def importer_bc(ctx, fichier) -> str:
-    """Reprise de BC émis avant l'application (onglets BC et BC_LIGNES d'un fichier Excel)."""
+    """Reprise de BC émis avant l'application (onglets BC, BC_LIGNES et NOUVEAUX ARTICLES d'un fichier Excel).
+    Les BC sont écrits dans les onglets BC / BC_LIGNES comme s'ils avaient été faits dans l'application ; les
+    articles absents du catalogue y sont créés. Réimporter le même fichier ne crée pas de doublon : il complète
+    seulement le catalogue et les codes des lignes déjà importées."""
     import catalogage
     xl = pd.read_excel(fichier, sheet_name=None, dtype=object)
     if "BC" not in xl or "BC_LIGNES" not in xl:
@@ -1531,12 +1653,38 @@ def importer_bc(ctx, fichier) -> str:
     bc = xl["BC"].astype(object).where(xl["BC"].notna(), "")
     bl = xl["BC_LIGNES"].astype(object).where(xl["BC_LIGNES"].notna(), "")
     store = ctx.get_store()
+    index, n_art = _nouveaux_articles(ctx, xl)
     existants = set(store.read("BC")["N° BC"].map(as_text))
     deja = sorted(set(bc["N° BC"].map(as_text)) & existants)
+    # BC déjà importés : on complète seulement les codes articles de leurs lignes
+    n_maj = 0
+    if deja:
+        bl_ex = store.read("BC_LIGNES")
+        bl_ex = bl_ex.loc[bl_ex["N° BC"].map(as_text).isin(deja).astype(bool)]
+        recs = bl_ex.to_dict("records")
+        avant = {as_text(r["ID_LigneBC"]): as_text(r.get("Code Article")) for r in recs}
+        _coder_lignes(recs, index)
+        maj = {as_text(r["ID_LigneBC"]): {"Code Article": r["Code Article"]} for r in recs
+               if as_text(r["Code Article"]) and not avant[as_text(r["ID_LigneBC"])]}
+        if maj:
+            store.update_many("BC_LIGNES", "ID_LigneBC", maj)
+            n_maj = len(maj)
+            # les propositions « à cataloguer » créées lors du premier import sont closes
+            pr = store.read("ARTICLES_A_CATALOGUER")
+            ids = {catalogage.PREFIXE_BC + i: v["Code Article"] for i, v in maj.items()}
+            clos = {as_text(r["ID_Proposition"]): {"Statut": "Intégré", "Code attribué": ids[as_text(r["ID_Ligne"])],
+                                                   "Traité par": "Reprise BC", "Date traitement": maintenant()[:10]}
+                    for _, r in pr.iterrows() if as_text(r["ID_Ligne"]) in ids
+                    and as_text(r["Statut"]) == "À analyser"}
+            if clos:
+                store.update_many("ARTICLES_A_CATALOGUER", "ID_Proposition", clos)
     bc = bc.loc[~bc["N° BC"].map(as_text).isin(existants)]
     bl = bl.loc[bl["N° BC"].map(as_text).isin(set(bc["N° BC"].map(as_text)))]
     if not len(bc):
-        return "Aucun BC à importer : tous les numéros existent déjà." + (f" ({', '.join(deja)})" if deja else "")
+        ctx.refresh()
+        return ("Aucun nouveau BC : tous les numéros existent déjà."
+                + (f" Catalogue : {n_art} article(s) créé(s), {n_maj} ligne(s) de BC codifiée(s)."
+                   if n_art or n_maj else ""))
     # chantier : nom -> code de l'onglet CHANTIERS quand il existe
     ch = ctx.load("CHANTIERS")
     plat = lambda t: " ".join(as_text(t).upper().replace("-", " ").split())
@@ -1549,8 +1697,9 @@ def importer_bc(ctx, fichier) -> str:
             bc[c] = bc[c].map(lambda v: to_date(v).isoformat() if to_date(v) else as_text(v))
     bl["Date BC"] = bl["Date BC"].map(lambda v: to_date(v).isoformat() if to_date(v) else as_text(v))
     cols_bc, cols_bl = TABLES["BC"], TABLES["BC_LIGNES"]
-    store.append("BC", [{c: r.get(c, "") for c in cols_bc} for r in bc.to_dict("records")])
     rows_bl = [{c: r.get(c, "") for c in cols_bl} for r in bl.to_dict("records")]
+    _coder_lignes(rows_bl, index)
+    store.append("BC", [{c: r.get(c, "") for c in cols_bc} for r in bc.to_dict("records")])
     for i in range(0, len(rows_bl), 500):
         store.append("BC_LIGNES", rows_bl[i:i + 500])
     _ajoute_fournisseurs(ctx, [as_text(f) for f in bc["Fournisseur"] if "PRÉCISER" not in as_text(f)])
@@ -1559,7 +1708,7 @@ def importer_bc(ctx, fichier) -> str:
     nums = [int(m.group(1)) for n in bc["N° BC"].map(as_text) if (m := re.search(r"(\d+)$", n))]
     if nums and max(nums) + 1 > int(to_num(p.get("Prochain N° BC")) or 0):
         store.update("PARAMETRES", "Paramètre", "Prochain N° BC", {"Valeur": str(max(nums) + 1)})
-    # articles sans code -> à cataloguer
+    # filet de sécurité : une ligne encore sans code part dans « Articles à cataloguer »
     hors = [r for r in rows_bl if not as_text(r.get("Code Article"))]
     if hors:
         store.append("ARTICLES_A_CATALOGUER", [{
@@ -1569,8 +1718,10 @@ def importer_bc(ctx, fichier) -> str:
             "ID_DA": "", "ID_Ligne": catalogage.PREFIXE_BC + as_text(r["ID_LigneBC"]), "Statut": "À analyser"}
             for r in hors])
     ctx.refresh()
-    return (f"{len(bc)} BC importé(s) ({len(rows_bl)} lignes), {len(hors)} article(s) envoyé(s) dans « Articles à "
-            f"cataloguer »." + (f" Ignorés car déjà présents : {', '.join(deja)}." if deja else "")
+    return (f"{len(bc)} BC importé(s) dans l'onglet BC ({len(rows_bl)} lignes dans BC_LIGNES). Catalogue : "
+            f"{n_art} nouvel(s) article(s) créé(s)" + (f", {len(hors)} ligne(s) restée(s) sans code" if hors else
+                                                       ", toutes les lignes ont un code article") + "."
+            + (f" Déjà présents (non réimportés) : {', '.join(deja)}." if deja else "")
             + (f" Prochain N° BC : {max(nums) + 1}." if nums else ""))
 
 

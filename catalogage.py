@@ -148,10 +148,44 @@ def _table_decisions(ctx, attente: pd.DataFrame, art: pd.DataFrame):
         "Famille": "", "Colisage": g["Colisage"].map(as_text), "Code à rattacher": ""})
     version = st.session_state.get("cat_v", 0)
     from schema import COLISAGES
+    import ia
+    if ia.disponible():
+        cle = f"cat-ia-{version}"
+        if st.button("✨ Proposer les décisions avec l'IA", key=f"{cle}-go",
+                     help="L'IA compare chaque article au catalogue et propose Rattacher / Intégrer (à vérifier)"):
+            with st.spinner("L'IA analyse les articles hors catalogue…"):
+                try:
+                    st.session_state[cle] = ia.proposer_catalogage(
+                        [{"designation": d, "reference": r} for d, r in zip(v["Désignation saisie"],
+                                                                            v["Référence saisie"])][:60],
+                        art, familles, ctx.version())
+                except ia.IAErreur as e:
+                    st.error(str(e))
+        props = st.session_state.get(cle) or []
+        for d in props:
+            i = d.get("index")
+            if not isinstance(i, int) or not 0 <= i < len(v):
+                continue
+            if d.get("decision") == "Rattacher" and as_text(d.get("code")):
+                v.iat[i, v.columns.get_loc("Décision")] = "Rattacher"
+                v.iat[i, v.columns.get_loc("Code à rattacher")] = as_text(d["code"]).upper()
+            elif d.get("decision") == "Intégrer":
+                v.iat[i, v.columns.get_loc("Décision")] = "Intégrer"
+                for c, ch in (("Désignation retenue", "designation"), ("Référence retenue", "reference")):
+                    if as_text(d.get(ch)):
+                        v.iat[i, v.columns.get_loc(c)] = as_text(d[ch]).upper()
+                if as_text(d.get("famille")) in familles:
+                    v.iat[i, v.columns.get_loc("Famille")] = as_text(d["famille"])
+        if props:
+            v.insert(v.columns.get_loc("Décision"), "Avis IA",
+                     [next((as_text(d.get("justification")) for d in props if d.get("index") == i), "")
+                      for i in range(len(v))])
+            st.caption("Propositions de l'IA pré-remplies : vérifiez-les avant d'appliquer.")
+        version = f"{version}-{len(props)}"
     ed = st.data_editor(
         v, hide_index=True, width="stretch", key=f"cat-ed-{version}",
         disabled=["Désignation saisie", "Référence saisie", "Demandes", "DA / BC", "Demandeurs",
-                  "Article proche du catalogue"],
+                  "Article proche du catalogue", "Avis IA"],
         column_config={
             "ids": None,
             "Décision": st.column_config.SelectboxColumn(options=DECISIONS, width="small"),

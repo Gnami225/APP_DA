@@ -20,14 +20,14 @@ TABLES = {
     "CHANTIERS": ["Code Chantier", "Nom Chantier", "Localisation", "Chef de chantier",
                   "Email validateur", "Actif"],
     "SERVICES": ["Code Service", "Libellé", "Responsable", "Email responsable"],
-    "UTILISATEURS": ["Email", "Nom", "Rôle", "Chantier", "Service", "Actif", "PIN", "Poste"],
+    "UTILISATEURS": ["Email", "Nom", "Rôle", "Chantier", "Service", "Actif", "PIN", "Poste", "Civilité"],
     "PARC": ["Code_Parc", "Désignation engin", "Type", "Marque / Modèle", "Chantier"],
     "ARTICLES": ["Code Article", "Désignation", "Référence", "Famille", "Colisage", "Sous-famille"],
     # ---- volet Achats
     "PARAMETRES": ["Paramètre", "Valeur"],
     "CONDITIONS_REGLEMENT": ["Condition"],
     "FOURNISSEURS": ["Code Fournisseur", "Nom", "Contact", "Téléphone", "Email", "NCC", "Adresse", "Actif",
-                     "Spécialités"],
+                     "Spécialités", "Statut", "Pays", "Ville", "Site web", "Source", "Ajouté le"],
     "BC": ["ID_BC", "N° BC", "Date BC", "ID_DA", "N° DA", "Chantier", "Code Parc", "Magasin", "Fournisseur",
            "Condition règlement", "Total HT", "Taux TVA", "Montant TVA", "Total TTC", "Statut", "Acheteur",
            "Validé par", "Date validation", "Motif rejet", "ID_TCP", "N° TCP", "Observations", "Créé le",
@@ -38,7 +38,14 @@ TABLES = {
                   "Qté livrée", "Date livraison", "Statut livraison", "Prix réf. HT", "Écart prix %"],
     "LIVRAISONS": ["ID_Livraison", "ID_BC", "N° BC", "ID_LigneBC", "ID_Ligne_DA", "Désignation", "Référence",
                    "Unité", "Qté livrée", "Date livraison", "Observation", "Fournisseur", "Chantier", "Saisi par",
-                   "Créé le"],
+                   "Créé le", "N° BL", "ID_Document", "Écart"],
+    # documents fournisseurs importés (BL, devis, factures) : le fichier est dans Google Drive, ici sa fiche
+    "DOCUMENTS": ["ID_Document", "Type", "N° document", "Date document", "Fournisseur", "ID_BC", "N° BC", "ID_DA",
+                  "N° DA", "Chantier", "Nom fichier", "Lien", "ID Drive", "Empreinte", "Lu par IA", "Écarts",
+                  "Saisi par", "Créé le"],
+    # résultats du sourcing (base interne + recherche web), gardés pour ne pas relancer la même recherche
+    "SOURCING": ["ID_Sourcing", "Clé article", "Désignation", "Référence", "Zones", "Date", "Résultats",
+                 "Nb recherches", "Par"],
     # articles saisis hors catalogue : à analyser puis intégrer (ou rattacher à un article existant)
     "ARTICLES_A_CATALOGUER": ["ID_Proposition", "Date", "Désignation", "Référence", "Colisage", "Saisi par",
                               "Service", "Chantier", "N° DA", "ID_DA", "ID_Ligne", "Statut", "Désignation retenue",
@@ -58,7 +65,8 @@ TABLES = {
 
 PRIORITES = ["Normale", "Urgente", "Critique"]
 COLISAGES = ["Unité", "Paire", "Paquet", "Carton", "Boîte", "Sac", "Rouleau", "Barre", "Botte", "Pot", "Bidon", "Fût",
-             "m", "ml", "m²", "m³", "kg", "Tonne", "L", "Voyage", "ha", "Jeu", "Lot", "Jour", "Forfait", "F CFA"]
+             "m", "ml", "m²", "m³", "kg", "Tonne", "L", "Voyage", "ha", "Jeu", "Lot", "Jour", "Forfait", "F CFA",
+             "Feuille"]
 HORS_CATALOGUE = "HORS CATALOGUE"
 # circuit DA : Émise -> Validée Resp. service -> Validée DG (part aux achats) ; Rejetée à tout niveau
 STATUTS = ["Émise", "Validée Resp. service", "Validée DG", "Rejetée"]
@@ -71,6 +79,11 @@ ROLES_VALID_DA = {"Chef de service", "Direction", "Admin"}  # onglet « Validati
 ROLES_DG = {"Direction", "Admin"}                            # valident au niveau DG (et peuvent suppléer le chef)
 ROLES_ACHATS = {"Acheteur", "Admin"}          # voient l'onglet Achats (DA, TCP, BC, fournisseurs)
 ROLES_VALID_BC = {"Direction", "Admin"}       # valident les bons de commande
+ROLES_BL = {"Acheteur", "Admin"}              # importent les bons de livraison
+ROLES_DA = {"Demandeur", "Chef de service", "Admin"}  # saisissent des DA (assistant IA, DA à l'oral)
+CIVILITES = ["M.", "Mme"]
+ZONES_SOURCING = ["Côte d'Ivoire", "Afrique de l'Ouest", "International"]
+TYPES_DOCUMENT = ["Bon de livraison", "Devis / proforma", "Facture", "Autre"]
 
 STATUTS_BC = ["Émis", "Validé", "Rejeté", "Annulé"]
 STATUTS_CATALOGAGE = ["À analyser", "Intégré", "Rattaché", "Rejeté"]
@@ -90,6 +103,10 @@ PARAMETRES_DEFAUT = {  # valeurs initiales, modifiables dans Administration > Pa
     "Préfixe BC": "BC-",
     "Préfixe TCP": "TCP-",
     "Seuil alerte prix (%)": "15",
+    "Délai traitement DA (jours)": "3",
+    "Délai livraison attendu (jours)": "15",
+    "Sourcing : recherches web max par article": "5",
+    "Sourcing : validité des résultats (jours)": "30",
     "Familles sans alerte prix": "TRANSPORT & LOGISTIQUE; FRAIS ADMIN. VÉHICULES; RÉPARATIONS & ENTRETIEN ENGINS; "
                                  "LOCATION ENGINS & MATÉRIEL",
 }
