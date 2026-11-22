@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<style>
+  body{margin:0;font-family:"Source Sans Pro",system-ui,sans-serif;font-size:15px;color:#31333f;background:transparent}
+  .z{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:2px}
+  button{border:1px solid #d6d6d9;background:#fff;border-radius:10px;padding:10px 16px;font-size:15px;cursor:pointer}
+  button.p{background:#f29200;color:#fff;border-color:#f29200;font-weight:600}
+  button.on{background:#c0392b;color:#fff;border-color:#c0392b}
+  #t{color:#6b6a65;font-style:italic;flex:1;min-width:180px}
+</style></head>
+<body><div class="z">
+  <button id="parler" class="p">🎤 Répondre</button>
+  <button id="relire">🔊 Réécouter</button>
+  <span id="t"></span>
+</div>
+<script>
+// Composant Streamlit sans dépendance : l'IA parle (synthèse vocale du navigateur) et écoute la réponse
+// (reconnaissance vocale du navigateur, français). Aucun autre service d'IA : le texte reconnu est envoyé à l'app.
+const send=(type,extra)=>window.parent.postMessage(Object.assign({isStreamlitMessage:true,type},extra),"*");
+const height=()=>send("streamlit:setFrameHeight",{height:document.body.scrollHeight+6});
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+const bP=document.getElementById("parler"), bR=document.getElementById("relire"), t=document.getElementById("t");
+let rec=null, ecoute=false, dernierId=null, aDire="", auto=true, voix=true;
+function dire(txt, ensuite){
+  if(!voix || !window.speechSynthesis || !txt){ if(ensuite) ensuite(); return; }
+  speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(txt); u.lang="fr-FR"; u.rate=1.02;
+  const v=speechSynthesis.getVoices().find(x=>x.lang&&x.lang.startsWith("fr")); if(v) u.voice=v;
+  u.onend=()=>{ if(ensuite) ensuite(); };
+  speechSynthesis.speak(u);
+}
+function stop(){ if(rec){ try{rec.stop();}catch(e){} } }
+function ecouter(){
+  if(!SR){ t.textContent="Reconnaissance vocale indisponible sur ce navigateur : répondez par écrit (ou micro du clavier)."; height(); return; }
+  if(ecoute){ stop(); return; }
+  if(window.speechSynthesis) speechSynthesis.cancel();
+  let fin="";
+  rec=new SR(); rec.lang="fr-FR"; rec.continuous=false; rec.interimResults=true;
+  rec.onresult=(e)=>{ let prov=""; fin="";
+    for(let i=0;i<e.results.length;i++){ const r=e.results[i]; if(r.isFinal) fin+=r[0].transcript; else prov+=r[0].transcript; }
+    t.textContent=(fin||prov)||"…"; height(); };
+  rec.onerror=(e)=>{ t.textContent = e.error==="not-allowed" ? "Micro refusé : autorisez le micro pour ce site, ou répondez par écrit."
+                                     : (e.error==="no-speech" ? "Je n'ai rien entendu : appuyez sur 🎤 et parlez." : "Erreur micro : "+e.error); };
+  rec.onend=()=>{ ecoute=false; bP.classList.remove("on"); bP.textContent="🎤 Répondre";
+    if(fin.trim()){ t.textContent="✓ « "+fin.trim()+" »"; send("streamlit:setComponentValue",{value:{texte:fin.trim(),id:Date.now()},dataType:"json"}); }
+    height(); };
+  rec.start(); ecoute=true; bP.classList.add("on"); bP.textContent="⏹ J'ai fini"; t.textContent="Je vous écoute…"; height();
+}
+bP.onclick=ecouter;
+bR.onclick=()=>dire(aDire);
+window.addEventListener("message",(e)=>{
+  if(!e.data || e.data.type!=="streamlit:render") return;
+  const a=e.data.args||{}; auto=a.auto!==false; voix=a.voix!==false;
+  if(a.id!==dernierId){ dernierId=a.id; aDire=a.dire||"";
+    if(aDire){ t.textContent="🔊 "+aDire; dire(aDire, ()=>{ if(auto && !a.fini) ecouter(); }); } }
+  height();
+});
+send("streamlit:componentReady",{apiVersion:1}); height();
+</script></body></html>
