@@ -222,6 +222,8 @@ def ui(ctx, df: pd.DataFrame | None, cle: str, perimetre: str):
     """Chat d'analyse. df = lignes d'achat (stats.base filtrée) ; None = seulement les DA."""
     if not ia.disponible():
         st.info("Assistant IA non configuré : ajoutez la section [ia] avec la clé API dans les secrets.")
+        if ctx.user.get("Rôle") == "Admin":
+            st.caption(ia.diagnostic())
         return
     outils = dict(outils_da(ctx, ctx.refs()))
     outils.update(outils_stock(ctx))

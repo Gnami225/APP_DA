@@ -39,16 +39,43 @@ class IAErreur(Exception):
 
 # =========================================================================== appel de l'API
 def _conf() -> dict:
+    """Section [ia] des secrets ; tolère aussi ANTHROPIC_API_KEY / api_key à la racine, ou une clé « sk-ant-… »
+    rangée par erreur dans une autre section (oubli de la ligne [ia], ordre des sections)."""
+    c = {}
     try:
-        c = dict(st.secrets.get("ia", {}))
+        sec = st.secrets
+        for nom in ("ia", "IA", "anthropic", "claude"):
+            if nom in sec:
+                c = {k.lower(): v for k, v in dict(sec[nom]).items()}
+                break
+        if not as_text(c.get("api_key")):
+            for k in ("ANTHROPIC_API_KEY", "anthropic_api_key", "api_key", "API_KEY"):
+                if as_text(sec.get(k)).startswith("sk-ant"):
+                    c["api_key"] = sec[k]
+                    break
+        if not as_text(c.get("api_key")):  # clé tombée dans une autre section
+            for nom in sec:
+                try:
+                    for k, v in dict(sec[nom]).items():
+                        if as_text(v).strip().startswith("sk-ant"):
+                            c["api_key"] = v
+                except Exception:
+                    continue
     except Exception:
-        c = {}
-    if not c.get("api_key"):
-        try:
-            c["api_key"] = st.secrets.get("ANTHROPIC_API_KEY", "")
-        except Exception:
-            pass
+        pass
+    if c.get("api_key"):
+        c["api_key"] = as_text(c["api_key"]).strip().strip('"').strip("'")
     return c
+
+
+def diagnostic() -> str:
+    """Pour l'administrateur : sections présentes dans les secrets (noms seulement, jamais les valeurs)."""
+    try:
+        noms = list(st.secrets.keys())
+    except Exception:
+        return "Secrets illisibles (fichier secrets invalide)."
+    return ("Sections / clés trouvées dans les secrets : " + ", ".join(noms[:20])
+            + ". Attendu : une section [ia] contenant api_key = \"sk-ant-…\".")
 
 
 def disponible() -> bool:

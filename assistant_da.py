@@ -109,6 +109,8 @@ def panneau(ctx, user: dict, nb_a_valider: int = 0):
         if not ia.disponible():
             st.caption("🤖 Assistant IA non activé : la clé API Claude n'est pas encore configurée "
                        "(section [ia] des secrets de l'application). La saisie classique ci-dessous fonctionne.")
+            if user.get("Rôle") == "Admin":
+                st.caption(ia.diagnostic())
             return
         mode = st.segmented_control("Assistant", ["🎙️ Faire ma DA en conversation", "❓ Poser une question"],
                                     key="ada-mode", label_visibility="collapsed")
