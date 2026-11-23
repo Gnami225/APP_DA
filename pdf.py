@@ -187,8 +187,8 @@ from logic import fmt_montant, montant_ligne, to_num
 
 _s.update({
     "bc_t": ParagraphStyle("bc_t", fontName="Helvetica-Bold", fontSize=13, leading=16, alignment=TA_CENTER),
-    "bc_c": ParagraphStyle("bc_c", fontName="Helvetica", fontSize=7, leading=8.5, alignment=TA_CENTER),
-    "bc_l": ParagraphStyle("bc_l", fontName="Helvetica", fontSize=8, leading=9.5),
+    "bc_c": ParagraphStyle("bc_c", fontName="Helvetica", fontSize=7.5, leading=9.5, alignment=TA_CENTER),
+    "bc_l": ParagraphStyle("bc_l", fontName="Helvetica", fontSize=8, leading=10),
     "bc_lb": ParagraphStyle("bc_lb", fontName="Helvetica-Bold", fontSize=8, leading=9.5),
     "bc_cb": ParagraphStyle("bc_cb", fontName="Helvetica-Bold", fontSize=8.5, leading=10, alignment=TA_CENTER),
     "bc_num": ParagraphStyle("bc_num", fontName="Helvetica-Bold", fontSize=11, leading=13, alignment=TA_CENTER),
@@ -250,7 +250,7 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
          _p(f"<b>Magasin :</b>   {as_text(bc.get('Magasin'))}", "bc_l"), ""],
         [_p(f"<b>Fournisseur :</b>   {as_text(bc.get('Fournisseur'))}", "bc_l"),
          _p(f"<b>DA N° :</b>   {as_text(bc.get('N° DA'))}", "bc_l"), ""],
-    ], colWidths=[W1, W2, W3], rowHeights=[21 * mm, 17 * mm, 8 * mm, 8 * mm])
+    ], colWidths=[W1, W2, W3], rowHeights=[21 * mm, 17 * mm, None, None])
     head.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.8, GRID), ("INNERGRID", (0, 0), (-1, -1), 0.8, GRID),
         ("SPAN", (1, 2), (2, 2)), ("SPAN", (1, 3), (2, 3)), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -261,6 +261,9 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     for (r, c) in [(1, 1), (2, 1), (3, 0), (3, 1)]:
         cell = head._cellvalues[r][c]
         cell.__init__(cell.text.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>"), cell.style)
+    for r in (2, 3):  # lignes Tél / Magasin et Fournisseur / DA : au moins 8 mm, plus si le texte est long
+        h = max(head._cellvalues[r][0].wrap(W1 - 12, 1000)[1], head._cellvalues[r][1].wrap(W2 + W3 - 12, 1000)[1])
+        head._argH[r] = max(8 * mm, h + 8)
     story = [head, Spacer(1, 3 * mm)]
 
     # ---- lignes
@@ -275,16 +278,22 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
                      _p(l.get("Code_Parc"), "bc_c"), _p(_qte(l.get("Quantité")), "bc_c"), _p(l.get("Unité"), "bc_c"),
                      _p(fmt_montant(l.get("Prix unitaire HT")), "bc_r"), _p(_qte(rem) if rem else "", "bc_c"), _p(_qte(tv), "bc_c"),
                      _p(fmt_montant(montant_ligne(l.get("Quantité"), l.get("Prix unitaire HT"), rem)), "bc_r")])
-    for _ in range(len(lignes), NB_LIGNES_BC):
-        data.append([""] * 9)
-    det = Table(data, colWidths=cw, repeatRows=1)
+    # hauteur de chaque ligne = selon le texte (désignation / référence longues sur plusieurs lignes), au moins
+    # une ligne standard ; les lignes vides complètent la page sans la dépasser
+    pad, h_std = 2.2, 5.2 * mm
+    hauteurs = [None]
+    for row in data[1:]:
+        h = max(c.wrap(w - 12, 1000)[1] for c, w in zip(row, cw))
+        hauteurs.append(max(h_std, h + 2 * pad + 1))
+    place = NB_LIGNES_BC * h_std - sum(hauteurs[1:])
+    vides = max(0, int(place // h_std))
+    data += [[""] * 9 for _ in range(vides)]
+    hauteurs += [h_std] * vides
+    det = Table(data, colWidths=cw, repeatRows=1, rowHeights=hauteurs)
     det.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.6, GRID), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 1), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 1), (-1, -1), 1.5),
-        ("ROWHEIGHTS", (0, 1), (-1, -1), 5 * mm),
+        ("TOPPADDING", (0, 1), (-1, -1), pad), ("BOTTOMPADDING", (0, 1), (-1, -1), pad),
     ]))
-    for i in range(1, len(data)):
-        det._argH[i] = det._argH[i] or 5.2 * mm
     story.append(det)
 
     # ---- pied : conditions, mentions, totaux, signature
@@ -296,14 +305,16 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     cond = _p(f"<b>Conditions de règlement :</b> {as_text(bc.get('Condition règlement'))}", "bc_l")
     cond.__init__(cond.text.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>"), cond.style)
     obs = as_text(bc.get("Observations"))
+    p_obs = _p(f"Observations : {obs}" if obs else "", "bc_l")
+    h_obs = max(12 * mm, p_obs.wrap(sum(cw[:5]) - 12, 1000)[1] + 8)  # observations longues : la case s'agrandit
     pied = Table([
         [cond, "", _p("TOTAL HT", "bc_rb"), _p(fmt_montant(bc.get("Total HT")), "bc_rb")],
-        [_p(f"Observations : {obs}" if obs else "", "bc_l"), "", _p(lib_tva, "bc_rb"),
+        [p_obs, "", _p(lib_tva, "bc_rb"),
          _p(fmt_montant(bc.get("Montant TVA")), "bc_rb")],
         ["", "", _p("TOTAL TTC", "bc_rb"), _p(fmt_montant(bc.get("Total TTC")), "bc_rb")],
         [_p("Mentionner T.V.A sur facture\nExemplaire à joindre à la facture", "bc_i"), "", _p(visa, "bc_i"), ""],
     ], colWidths=[sum(cw[:4]), cw[4], cw[5] + cw[6] + cw[7], cw[8]],
-       rowHeights=[6 * mm, 6 * mm, 6 * mm, 20 * mm])
+       rowHeights=[6 * mm, 6 * mm, h_obs - 6 * mm, 20 * mm])
     pied.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.8, GRID),
         ("GRID", (2, 0), (3, 2), 0.6, GRID),
