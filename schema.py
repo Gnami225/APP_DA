@@ -43,6 +43,11 @@ TABLES = {
     "DOCUMENTS": ["ID_Document", "Type", "N° document", "Date document", "Fournisseur", "ID_BC", "N° BC", "ID_DA",
                   "N° DA", "Chantier", "Nom fichier", "Lien", "ID Drive", "Empreinte", "Lu par IA", "Écarts",
                   "Saisi par", "Créé le"],
+    # stock : chaque entrée / sortie / transfert / inventaire ; le stock = somme des mouvements par magasin
+    "STOCK_MOUVEMENTS": ["ID_Mouvement", "Date", "Magasin", "Type", "Code Article", "Désignation", "Référence",
+                         "Unité", "Quantité", "Code_Parc", "Bénéficiaire", "Motif", "ID_BC", "N° BC", "N° BL",
+                         "ID_Livraison", "ID_Transfert", "Magasin lié", "Statut", "Valeur unitaire", "Saisi par",
+                         "Créé le"],
     # résultats du sourcing (base interne + recherche web), gardés pour ne pas relancer la même recherche
     "SOURCING": ["ID_Sourcing", "Clé article", "Désignation", "Référence", "Zones", "Date", "Résultats",
                  "Nb recherches", "Par"],
@@ -74,7 +79,7 @@ DA_EN_ATTENTE = ["Émise", "Validée Resp. service"]
 ANCIENS_STATUTS = {"Soumise": "Émise", "Validée": "Validée DG"}  # DA créées avant le circuit à deux niveaux
 STATUTS_LIGNE = ["À commander", "Commandée partielle", "Commandée", "Livrée partielle", "Livrée", "Annulée"]
 ROLES_ADMIN = {"Admin"}
-ROLES = ["Demandeur", "Chef de service", "Acheteur", "Direction", "Admin"]
+ROLES = ["Demandeur", "Chef de service", "Acheteur", "Direction", "Admin", "Magasinier"]
 ROLES_VALID_DA = {"Chef de service", "Direction", "Admin"}  # onglet « Validation DA »
 ROLES_DG = {"Direction", "Admin"}                            # valident au niveau DG (et peuvent suppléer le chef)
 ROLES_ACHATS = {"Acheteur", "Admin"}          # voient l'onglet Achats (DA, TCP, BC, fournisseurs)
@@ -82,6 +87,10 @@ ROLES_VALID_BC = {"Direction", "Admin"}       # valident les bons de commande
 ROLES_BL = {"Acheteur", "Admin"}              # importent les bons de livraison
 ROLES_DA = {"Demandeur", "Chef de service", "Admin"}  # saisissent des DA (assistant IA, DA à l'oral)
 CIVILITES = ["M.", "Mme"]
+ROLES_STOCK_VUE = {"Admin", "Direction", "Acheteur"}  # consultent les stocks de tous les magasins
+# magasin = chantier (un magasin par chantier) ; le magasinier ne voit que le magasin de son chantier
+TYPES_MOUVEMENT = {"Entrée réception": 1, "Entrée transfert": 1, "Stock initial": 1, "Sortie": -1,
+                   "Sortie transfert": -1, "Ajustement inventaire": 0}  # 0 : signe porté par la quantité
 ZONES_SOURCING = ["Côte d'Ivoire", "Afrique de l'Ouest", "International"]
 TYPES_DOCUMENT = ["Bon de livraison", "Devis / proforma", "Facture", "Autre"]
 

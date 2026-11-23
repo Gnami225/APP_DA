@@ -691,6 +691,88 @@ def _bc_suivant():
     st.session_state["bc-mode"] = "Nouveau BC"
 
 
+def _bc_ia(ctx, da, lignes: pd.DataFrame, k: str, fours: list[str], conds: list[str], taux: float) -> dict:
+    """« ✨ Remplir le BC avec l'IA » : consigne écrite ou dictée et / ou proforma (photo, PDF).
+    Les valeurs des lignes vont dans st.session_state[bc-ia-k] (id -> valeurs), l'en-tête dans bc-ia-k-ent."""
+    cle = f"bc-ia-{k}"
+    ent = st.session_state.get(f"{cle}-ent") or {}
+    if not ia.disponible():
+        return ent
+    v = st.session_state.get(f"{cle}-in-v", 0)
+    with st.expander("✨ Remplir le BC avec l'IA — consigne écrite / dictée ou proforma (photo, PDF)",
+                     expanded=not st.session_state.get(cle)):
+        txt = st.text_area("Consigne", key=f"{cle}-txt-{v}", height=80, label_visibility="collapsed",
+                           placeholder="Ex. : chez SOCOCE, pneus à 185 mille, filtres à 12 500 avec 5 % de remise, "
+                                       "pas les bâches, paiement 30 jours fin de mois, livraison au magasin de Tortiya")
+        f = st.file_uploader("Proforma / devis (facultatif)", type=["jpg", "jpeg", "png", "webp", "pdf"],
+                             key=f"{cle}-f-{v}")
+        a, b = st.columns([2, 1])
+        if a.button("✨ Remplir le BC", type="primary", key=f"{cle}-go-{v}", disabled=not (txt.strip() or f)):
+            attendues = _attendues(lignes, "_id", "Reste à commander", "Colisage")
+            valeurs = dict(st.session_state.get(cle) or {})
+            nouv = dict(ent)
+            from sourcing import meme_fournisseur
+
+            def _four(nom):
+                nom = " ".join(as_text(nom).upper().split())
+                return next((x for x in fours if meme_fournisseur(x, nom)), nom) if nom else ""
+
+            try:
+                with st.spinner("L'IA prépare le bon de commande…"):
+                    if f is not None:
+                        doc = ia.lire_document(f.name, f.getvalue())
+                        for i, l in ia.rapprocher(doc, attendues).items():
+                            valeurs[i] = {**valeurs.get(i, {}), **{c: l.get(c) for c in (
+                                "prix_unitaire_ht", "remise_pct", "tva_pct", "quantite") if l.get(c) is not None}}
+                        if as_text(doc.get("fournisseur")):
+                            nouv["fournisseur"] = _four(doc["fournisseur"])
+                        if as_text(doc.get("conditions")):
+                            nouv["condition"] = as_text(doc["conditions"])
+                        nouv["observations"] = " ".join(x for x in (
+                            f"Proforma n° {as_text(doc.get('numero'))}" if as_text(doc.get("numero")) else "",
+                            f"du {fmt_date(doc.get('date'))}" if as_text(doc.get("date")) else "") if x)
+                        st.session_state[f"{cle}-doc"] = doc
+                    if txt.strip():
+                        r = ia.remplir_bc(txt.strip(), attendues, fours, conds,
+                                          {"entete": nouv, "lignes": valeurs, "tva_par_defaut": taux})
+                        ids = {a_["id"] for a_ in attendues}
+                        for l in r.get("lignes", []):
+                            i = as_text(l.get("id"))
+                            if i in ids:
+                                valeurs[i] = {**valeurs.get(i, {}), **{c: l.get(c) for c in (
+                                    "prix_unitaire_ht", "remise_pct", "tva_pct", "quantite", "inclure")
+                                    if l.get(c) is not None}}
+                        if as_text(r.get("fournisseur")):
+                            nouv["fournisseur"] = _four(r["fournisseur"])
+                        for c_, ch in (("condition", "condition_reglement"), ("magasin", "magasin"),
+                                       ("observations", "observations")):
+                            if as_text(r.get(ch)):
+                                nouv[c_] = as_text(r[ch])
+                st.session_state[cle] = valeurs
+                st.session_state[f"{cle}-ent"] = nouv
+                st.session_state[f"{cle}-v"] = st.session_state.get(f"{cle}-v", 0) + 1
+                st.session_state[f"{cle}-ent-v"] = st.session_state.get(f"{cle}-ent-v", 0) + 1
+                st.session_state[f"{cle}-in-v"] = v + 1
+                st.rerun()
+            except ia.IAErreur as e:
+                st.error(str(e))
+            except Exception as e:
+                st.error(f"Impossible de remplir le BC : {e}")
+        if st.session_state.get(cle) and b.button("Effacer les propositions", key=f"{cle}-raz-{v}"):
+            for x in (cle, f"{cle}-ent", f"{cle}-doc"):
+                st.session_state.pop(x, None)
+            for x in (f"{cle}-v", f"{cle}-ent-v"):
+                st.session_state[x] = st.session_state.get(x, 0) + 1
+            st.rerun()
+        doc = st.session_state.get(f"{cle}-doc")
+        if st.session_state.get(cle):
+            st.caption(f"✓ {len(st.session_state[cle])} ligne(s) préremplie(s)"
+                       + (f" d'après {as_text(doc.get('type_document'))} {as_text(doc.get('numero'))}" if doc else "")
+                       + (f" — total HT lu : {fmt_montant(doc['total_ht'])} F" if doc and doc.get("total_ht") else "")
+                       + ". Vérifiez la grille ci-dessous ; vous pouvez ajouter une consigne et relancer.")
+    return st.session_state.get(f"{cle}-ent") or {}
+
+
 def _vue_bc(ctx):
     if st.session_state.get("bc_ok"):
         ok = st.session_state["bc_ok"]
@@ -748,16 +830,24 @@ def _vue_bc(ctx):
     if cond_def and cond_def not in conds:
         conds = [cond_def] + conds
     k = f"{da['_id']}-{id_tcp}-{four_def}"
+    cle_ia = f"bc-ia-{k}"
+    taux = to_num(p.get("Taux TVA (%)"))  # taux proposé par défaut sur chaque ligne, modifiable article par article
+    ent = _bc_ia(ctx, da, lignes, k, fours, conds, taux)  # IA : texte / dictée / proforma -> valeurs proposées
+    if ent.get("fournisseur") and ent["fournisseur"] not in fours:
+        fours = [ent["fournisseur"]] + fours
+    if ent.get("condition") and ent["condition"] not in conds:
+        conds = [ent["condition"]] + conds
+    four_v, cond_v = ent.get("fournisseur") or four_def, ent.get("condition") or cond_def
+    ev = st.session_state.get(f"{cle_ia}-ent-v", 0)  # renouvelle les champs quand l'IA propose des valeurs
     c1, c2 = st.columns(2)
-    four = c1.selectbox("Fournisseur", fours, index=fours.index(four_def) if four_def else None,
-                        accept_new_options=True, key=f"bc-four-{k}", placeholder="Choisir ou saisir")
+    four = c1.selectbox("Fournisseur", fours, index=fours.index(four_v) if four_v in fours else None,
+                        accept_new_options=True, key=f"bc-four-{k}-{ev}", placeholder="Choisir ou saisir")
     date_bc = c2.date_input("Date du BC", value=date.today(), format="DD/MM/YYYY", key=f"bc-date-{k}")
     c1, c2 = st.columns(2)
-    cond = c1.selectbox("Conditions de règlement", conds, index=conds.index(cond_def) if cond_def else None,
-                        accept_new_options=True, key=f"bc-cond-{k}", placeholder="Choisir ou saisir")
-    magasin = c2.text_input("Magasin", key=f"bc-mag-{k}")
-    taux = to_num(p.get("Taux TVA (%)"))  # taux proposé par défaut sur chaque ligne, modifiable article par article
-    obs = st.text_input("Observations", key=f"bc-obs-{k}")
+    cond = c1.selectbox("Conditions de règlement", conds, index=conds.index(cond_v) if cond_v in conds else None,
+                        accept_new_options=True, key=f"bc-cond-{k}-{ev}", placeholder="Choisir ou saisir")
+    magasin = c2.text_input("Magasin", value=ent.get("magasin", ""), key=f"bc-mag-{k}-{ev}")
+    obs = st.text_input("Observations", value=ent.get("observations", ""), key=f"bc-obs-{k}-{ev}")
 
     # ---- lignes de la DA
     st.markdown("##### Articles à commander")
@@ -768,9 +858,7 @@ def _vue_bc(ctx):
         "Unité": lignes["Colisage"].map(as_text).values, "Reste DA": lignes["Reste à commander"].values,
         "Quantité": lignes["Reste à commander"].values,
         "Prix unitaire HT": [prix_tcp.get(i) for i in lignes["_id"]], "Remise %": 0.0, "TVA %": taux})
-    cle_ia = f"bc-ia-{k}"
-    lu = ia.ui_lecture(cle_ia, _attendues(lignes, "_id", "Reste à commander", "Colisage"),
-                       "le devis / la proforma du fournisseur") or {}
+    lu = st.session_state.get(cle_ia) or {}
     if lu:
         for c, champ in (("Prix unitaire HT", "prix_unitaire_ht"), ("Remise %", "remise_pct"), ("TVA %", "tva_pct"),
                          ("Quantité", "quantite")):
@@ -784,6 +872,9 @@ def _vue_bc(ctx):
     grille.insert(grille.columns.get_loc("Prix unitaire HT"), "Prix moyen passé", [x["Prix moyen"] for x in refs_l])
     if t:  # seules les lignes attribuées à ce fournisseur dans le TCP sont cochées
         grille["Inclure"] = grille["ID"].map(lambda i: i in prix_tcp)
+    if lu:  # consigne de l'IA : lignes à exclure / à inclure
+        grille["Inclure"] = [bool(lu[i]["inclure"]) if i in lu and lu[i].get("inclure") is not None else v
+                             for i, v in zip(grille["ID"], grille["Inclure"])]
     ed = st.data_editor(
         grille, hide_index=True, width="stretch", key=f"bc-grille-{k}-{st.session_state.get(cle_ia + '-v', 0)}",
         disabled=["Désignation", "Reste DA", "Dernier prix", "Meilleur prix passé", "Meilleur 12 mois",
@@ -1333,6 +1424,8 @@ def _enregistre_livraisons(ctx, rows: list[dict], ids_bc: set[str]):
     with st.spinner("Enregistrement des livraisons…"):
         if rows:
             ctx.get_store().append("LIVRAISONS", rows)
+            import magasin
+            magasin.entrees_reception(ctx, rows)  # la marchandise reçue entre dans le stock du magasin du chantier
         maj_livraisons(ctx, ids_bc)
         ctx.refresh(False)
 

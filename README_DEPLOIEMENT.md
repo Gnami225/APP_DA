@@ -190,3 +190,27 @@ article » (5 par défaut).
   seul modèle d'IA appelé. **Le dossier `voix/` (index.html) doit être envoyé sur GitHub avec les fichiers .py.**
 - **Prix passés** : dernier prix, meilleur prix et prix moyen pondéré sur **tout l'historique**, plus le meilleur
   prix des 12 derniers mois et le nombre d'achats depuis la première date.
+
+## Magasin (gestion de stock) — 23/11/2026
+- **Rôle Magasinier**, poste « Magasin » (codes MAG-…), **chantier = son magasin** (un magasin par chantier). Il ne
+  voit que l'onglet **Magasin** de son chantier. Création : Administration > Utilisateurs & accès, poste « Magasin »,
+  code chantier obligatoire.
+- **📥 Réception** : photo / PDF du BL → lecture IA → BC du chantier → confirmation → livraison sur le BC et la DA
+  + **entrée en stock**. Toute réception saisie ailleurs (acheteur, admin) alimente aussi le stock du chantier.
+- **📤 Sortie** : texte libre ou dicté → l'IA retrouve l'article dans le stock et l'engin → vérification →
+  enregistrement (sorties libres, tracées ; impossible de sortir plus que le stock).
+- **📦 Mon stock**, **🔁 Transfert** (confirmé par le magasin destinataire), **📋 Inventaire** (saisi, dicté ou
+  importé d'Excel ; le premier = stock de départ), **❓ Aide**.
+- **Onglet Stocks** (admin, direction, acheteur) : stocks de tous les magasins, valeur au prix moyen pondéré des
+  achats, consommations 90 jours par engin et article, mouvements ; l'admin peut agir sur n'importe quel magasin.
+- Liens : conseil « en stock au magasin X » lors de la saisie d'une DA ; assistant d'analyse (outil stocks).
+- Table **STOCK_MOUVEMENTS** (créée automatiquement). Un ancien onglet MOUVEMENTS_STOCK (essai Kobo) n'est pas utilisé.
+
+## Saisie DA et BC par l'IA : conversation, photo, PDF (23/11/2026)
+- **DA** (Nouvelle DA) : « ✨ Remplir avec l'IA » → ✍️ texte ou dictée, ou 📷 photo / PDF (DA papier, liste
+  manuscrite, devis…) : articles rattachés au catalogue, priorité / date de besoin / observations reprises si
+  indiquées ; et « 🎙️ Faire ma DA en conversation » (questions de l'IA, réponses à l'oral ou à l'écrit).
+- **BC** (Achats > Bons de commande, après le choix de la DA) : « ✨ Remplir le BC avec l'IA » → consigne écrite ou
+  dictée (« chez SOCOCE, pneus à 185 mille, 5 % de remise, pas les bâches, paiement 30 jours fin de mois ») et / ou
+  proforma en photo / PDF : fournisseur, conditions, magasin, observations (n° de proforma), prix, remises, TVA,
+  quantités et lignes à exclure sont préremplis ; consignes successives possibles ; vérification puis « Émettre ».

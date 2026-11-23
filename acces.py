@@ -16,6 +16,7 @@ POSTES = {  # poste = service PWC ; la valeur est le code service (et le préfix
     "Direction générale": "DG",
     "Direction d'exploitation": "DE",
     "Achats": "ACH",
+    "Magasin": "MAG",  # magasiniers de chantier (rôle Magasinier ; le chantier = leur magasin)
 }
 
 

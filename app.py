@@ -23,11 +23,12 @@ import catalogage
 import assistant
 import assistant_da
 import bl
+import magasin
 import ia
 import graphs
 import prix
 import stats
-from schema import (TABLES, ANCIENS_STATUTS, COLISAGES, DA_EN_ATTENTE, PRIORITES, ROLES, ROLES_ACHATS, ROLES_ADMIN, ROLES_BL, ROLES_DA, CIVILITES,
+from schema import (TABLES, ANCIENS_STATUTS, COLISAGES, DA_EN_ATTENTE, PRIORITES, ROLES, ROLES_ACHATS, ROLES_ADMIN, ROLES_BL, ROLES_DA, CIVILITES, ROLES_STOCK_VUE,
                     ROLES_DG, ROLES_VALID_BC, ROLES_VALID_DA, STATUTS, STATUTS_LIGNE, LIGNE_BC_RETIREE)
 from storage import ExcelStore, GoogleSheetStore
 
@@ -575,23 +576,59 @@ def da_par_ia(parcs: list[str]):
     if not ia.disponible():
         return
     v = st.session_state.get("ia-da-v", 0)
-    with st.expander("🎙️ Décrire la demande en langage naturel — l'IA remplit les articles",
+    with st.expander("✨ Remplir avec l'IA — texte, dictée, photo ou PDF",
                      expanded=not st.session_state.lignes):
         st.caption("Écrivez ou dictez (touche 🎤 du clavier du téléphone), par exemple : « 4 pneus 315/80 R22.5 "
                    "pour le camion 12, 2 filtres à gasoil de la niveleuse et 20 sacs de ciment pour le dallage ».")
-        txt = st.text_area("Besoin", key=f"ia-da-txt-{v}", height=100, label_visibility="collapsed",
-                           placeholder="Décrivez les articles, quantités, engins et usages…")
-        if st.button("✨ Analyser avec l'IA", key=f"ia-da-go-{v}", type="primary", disabled=not txt.strip()):
-            with st.spinner("L'IA analyse la demande et cherche les articles dans le catalogue…"):
-                try:
-                    st.session_state["ia-da-lignes"] = ia.analyser_besoin(
-                        txt, load("ARTICLES"), load("PARC"), COLISAGES, version_donnees())
-                    if not st.session_state["ia-da-lignes"]:
-                        st.warning("Aucun article reconnu : précisez la demande.")
-                except ia.IAErreur as e:
-                    st.error(str(e))
-                except Exception as e:
-                    st.error(f"Analyse impossible : {e}")
+        source = st.segmented_control("Source", ["✍️ Texte ou dictée", "📷 Photo ou PDF"], default="✍️ Texte ou dictée",
+                                      key="ia-da-src", label_visibility="collapsed") or "✍️ Texte ou dictée"
+        if source == "✍️ Texte ou dictée":
+            txt = st.text_area("Besoin", key=f"ia-da-txt-{v}", height=100, label_visibility="collapsed",
+                               placeholder="Décrivez les articles, quantités, engins et usages…")
+            if st.button("✨ Analyser avec l'IA", key=f"ia-da-go-{v}", type="primary", disabled=not txt.strip()):
+                with st.spinner("L'IA analyse la demande et cherche les articles dans le catalogue…"):
+                    try:
+                        st.session_state["ia-da-lignes"] = ia.analyser_besoin(
+                            txt, load("ARTICLES"), load("PARC"), COLISAGES, version_donnees())
+                        if not st.session_state["ia-da-lignes"]:
+                            st.warning("Aucun article reconnu : précisez la demande.")
+                    except ia.IAErreur as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"Analyse impossible : {e}")
+        else:
+            st.caption("Photo d'une DA papier, d'une liste écrite à la main, d'un devis, ou un PDF : l'IA lit les "
+                       "articles et les rattache au catalogue (et reprend priorité / date de besoin si indiquées).")
+            f = st.file_uploader("Document", type=["jpg", "jpeg", "png", "webp", "pdf"], key=f"ia-da-f-{v}",
+                                 label_visibility="collapsed")
+            consigne = st.text_input("Précision (facultatif)", key=f"ia-da-cons-{v}",
+                                     placeholder="Ex. : c'est pour le chantier de Bonoua, usage : entretien des camions")
+            if f is not None and st.button("📷 Lire le document", key=f"ia-da-fgo-{v}", type="primary"):
+                with st.spinner("Lecture du document et recherche des articles dans le catalogue…"):
+                    try:
+                        lignes, ent = ia.analyser_document_da(f.name, f.getvalue(), load("ARTICLES"), load("PARC"),
+                                                              COLISAGES, version_donnees(), consigne.strip())
+                        st.session_state["ia-da-lignes"] = lignes
+                        pend = {}
+                        if as_text(ent.get("priorite")) in PRIORITES:
+                            pend["da-prio"] = ent["priorite"]
+                        try:
+                            if as_text(ent.get("date_besoin")):
+                                pend["da-besoin"] = date.fromisoformat(as_text(ent["date_besoin"])[:10])
+                        except ValueError:
+                            pass
+                        if as_text(ent.get("observations")):
+                            pend["da-obs"] = as_text(ent["observations"])
+                        if pend:
+                            st.session_state["da_pending"] = pend
+                        if not lignes:
+                            st.warning("Aucun article lu : vérifiez la photo (nette, bien éclairée, à plat).")
+                        else:
+                            st.rerun()
+                    except ia.IAErreur as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"Lecture impossible : {e}")
         props = st.session_state.get("ia-da-lignes")
         if not props:
             return
@@ -1368,7 +1405,7 @@ def _creer_acces(personnes: list[dict]) -> tuple[list[str], list[str]]:
         codes.add(code)
         noms.add(nom.lower())
         role = p.get("Rôle") if p.get("Rôle") in ROLES else (
-            "Acheteur" if poste == "Achats" else
+            "Acheteur" if poste == "Achats" else "Magasinier" if poste == "Magasin" else
             "Direction" if poste in ("Direction générale", "Direction d'exploitation") else "Demandeur")
         rows.append({"Email": p.get("Email", ""), "Nom": nom, "Rôle": role,
                      "Chantier": p.get("Chantier", ""), "Service": p.get("Service", ""),
@@ -1693,6 +1730,10 @@ def main():
         onglets["Réception BL"] = lambda: bl.onglet_bl(ctx)
     if role in ROLES_VALID_BC:
         onglets["Validation BC"] = lambda: achats.onglet_validation_bc(ctx)
+    if role == "Magasinier":  # le magasinier ne voit que son magasin
+        onglets["Magasin"] = lambda: magasin.onglet_magasin(ctx)
+    if role in ROLES_STOCK_VUE:
+        onglets["Stocks"] = lambda: magasin.vue_stocks(ctx)
     if admin:
         onglets["Administration"] = lambda: onglet_admin(user)
         onglets["Statistiques"] = lambda: stats.onglet_statistiques(ctx)  # administrateurs uniquement

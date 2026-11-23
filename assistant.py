@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 
 import ia
-from logic import as_text, to_date
+from logic import as_text, to_date, to_num
 
 DIM_ACHATS = {"mois": "mois", "trimestre": "trimestre", "annee": "annee", "semaine": "semaine",
               "chantier": "chantier", "famille": "famille", "fournisseur": "four", "article": "article",
@@ -172,6 +172,45 @@ def outils_da(ctx, refs: dict) -> dict:
             "top": {"type": "integer"}}}}, analyser_da)}
 
 
+def outils_stock(ctx) -> dict:
+    import magasin
+    noms = ctx.refs()["chantiers"]
+
+    def analyser_stock(magasin_contient="", article_contient="", vue="stock"):
+        if vue == "consommations":
+            m = magasin.mouvements(ctx)
+            if not len(m):
+                return "Aucun mouvement de stock.", None
+            m = m.loc[m["Type"].map(as_text) == "Sortie"].copy()
+            m["Magasin"] = m["Magasin"].map(lambda c: noms.get(c, c))
+            if magasin_contient:
+                m = m.loc[m["Magasin"].str.contains(magasin_contient, case=False, regex=False)]
+            if article_contient:
+                m = m.loc[(m["Désignation"] + " " + m["Référence"]).str.contains(article_contient, case=False, regex=False)]
+            m["Valeur"] = m["Quantité"].map(to_num) * m["Valeur unitaire"].map(to_num)
+            t = (m.groupby(["Magasin", "Code_Parc", "Désignation", "Référence"], as_index=False)
+                 .agg(Quantité=("q", lambda x: -x.sum()), Valeur=("Valeur", "sum"), Sorties=("q", "size"))
+                 .sort_values("Valeur", ascending=False).head(60))
+            return _sortie(t)
+        t = magasin.stock(ctx)
+        if not len(t):
+            return "Aucun stock enregistré.", None
+        t = t.assign(Magasin=t["Magasin"].map(lambda c: noms.get(c, c)))
+        if magasin_contient:
+            t = t.loc[t["Magasin"].str.contains(magasin_contient, case=False, regex=False)]
+        if article_contient:
+            t = t.loc[(t["Désignation"] + " " + t["Référence"]).str.contains(article_contient, case=False, regex=False)]
+        return _sortie(t.drop(columns=["cle"]).head(150))
+
+    return {"analyser_stock": ({
+        "name": "analyser_stock",
+        "description": "Stocks des magasins de chantier (vue=stock : quantités disponibles, sorties 30 j) ou "
+                       "consommations (vue=consommations : sorties par magasin, engin et article, valorisées).",
+        "input_schema": {"type": "object", "properties": {
+            "vue": {"type": "string", "enum": ["stock", "consommations"]},
+            "magasin_contient": {"type": "string"}, "article_contient": {"type": "string"}}}}, analyser_stock)}
+
+
 SYSTEME = (ia.CONTEXTE_PWC + " Tu es l'analyste achats de la direction. Pour CHAQUE chiffre, appelle les outils : "
            "n'invente ni ne calcules de tête aucun montant. Si un nom est incertain, appelle d'abord lister_valeurs. "
            "Réponse : synthèse en 2-3 phrases, puis les chiffres clés (montants arrondis, en F CFA, séparateur des "
@@ -185,6 +224,7 @@ def ui(ctx, df: pd.DataFrame | None, cle: str, perimetre: str):
         st.info("Assistant IA non configuré : ajoutez la section [ia] avec la clé API dans les secrets.")
         return
     outils = dict(outils_da(ctx, ctx.refs()))
+    outils.update(outils_stock(ctx))
     if df is not None and len(df):
         outils.update(outils_achats(df))
     hist = st.session_state.setdefault(cle, [])

@@ -169,7 +169,7 @@ def _jetons(t: str) -> list[str]:
                                                                               "POUR", "EN", "A", "AU", "AVEC"}]
 
 
-@st.cache_resource(show_spinner=False, max_entries=2)
+@st.cache_resource(show_spinner=False, max_entries=8)
 def _index_catalogue(version, _art: pd.DataFrame) -> list[tuple]:
     out = []
     for c, d, r, f, u in zip(_art["Code Article"], _art["Désignation"], _art["Référence"], _art["Famille"],
@@ -220,7 +220,12 @@ _OUTIL_EXTRAIRE = {
             "unite": {"type": "string", "description": "unité dite (sac, tonne, litre, unité…) ou vide"},
             "engin": {"type": "string", "description": "engin ou véhicule concerné, tel que dit (ex. camion 12)"},
             "usage": {"type": "string", "description": "usage ou destination, déduit du texte si possible"}},
-        "required": ["designation", "quantite"]}}}, "required": ["articles"]}}
+        "required": ["designation", "quantite"]}},
+        "entete": {"type": "object", "description": "si indiqué (formulaire de DA, liste écrite…)", "properties": {
+            "priorite": {"type": "string", "enum": ["Normale", "Urgente", "Critique"]},
+            "date_besoin": {"type": "string", "description": "AAAA-MM-JJ"},
+            "observations": {"type": "string"}}}},
+        "required": ["articles"]}}
 
 _OUTIL_CHOISIR = {
     "name": "choisir_articles",
@@ -245,11 +250,26 @@ def analyser_besoin(texte_libre: str, art: pd.DataFrame, parc: pd.DataFrame, col
                     version=0) -> list[dict]:
     """Texte libre -> lignes de DA rattachées au catalogue (2 appels : extraction, puis choix parmi des
     candidats trouvés localement dans le catalogue)."""
-    ex = structure(CONTEXTE_PWC + " Extrais chaque article demandé, avec sa quantité.", texte_libre,
-                   _OUTIL_EXTRAIRE, rapide=True)
+    return _analyser(texte_libre, art, parc, colisages, version, rapide=True)[0]
+
+
+def analyser_document_da(nom: str, contenu: bytes, art: pd.DataFrame, parc: pd.DataFrame, colisages: list[str],
+                         version=0, consigne: str = "") -> tuple[list[dict], dict]:
+    """Photo / PDF (DA papier, liste manuscrite, devis, capture…) -> (lignes de DA, en-tête lu)."""
+    return _analyser([bloc_fichier(nom, contenu),
+                      {"type": "text", "text": "Document : demande ou liste de besoins d'un chantier. Lis toutes les "
+                                               "lignes (même manuscrites)." + (f" Précision : {consigne}" if consigne
+                                                                                else "")}],
+                     art, parc, colisages, version, rapide=False)
+
+
+def _analyser(contenu, art, parc, colisages, version, rapide) -> tuple[list[dict], dict]:
+    ex = structure(CONTEXTE_PWC + " Extrais chaque article demandé, avec sa quantité ; et l'en-tête s'il est "
+                   "indiqué (priorité, date de besoin, observations).", contenu, _OUTIL_EXTRAIRE, rapide=rapide)
     besoins = ex.get("articles") or []
+    entete = ex.get("entete") or {}
     if not besoins:
-        return []
+        return [], entete
     cand = [candidats(art, f"{b.get('designation', '')} {b.get('caracteristiques', '')}", 12, version)
             for b in besoins]
     parcs = [f"{as_text(c)} = {as_text(d)}" for c, d in zip(parc["Code_Parc"], parc["Désignation engin"])
@@ -284,7 +304,7 @@ def analyser_besoin(texte_libre: str, art: pd.DataFrame, parc: pd.DataFrame, col
                        "Usage": as_text(b.get("usage")), "Statut": statut,
                        "Confiance": as_text(c.get("confiance")), "À vérifier": as_text(c.get("remarque")),
                        "Texte": as_text(b.get("texte"))})
-    return lignes
+    return lignes, entete
 
 
 # =========================================================================== 2. lecture de documents
@@ -509,3 +529,29 @@ def discuter(system: str, messages: list[dict], rapide: bool = True, max_tokens:
     while msgs and msgs[0]["role"] != "user":
         msgs.pop(0)
     return _texte(_creer(system=system, messages=msgs, max_tokens=max_tokens, rapide=rapide))
+
+
+_OUTIL_BC = {
+    "name": "remplir_bc",
+    "description": "Valeurs du bon de commande d'après la demande de l'acheteur.",
+    "input_schema": {"type": "object", "properties": {
+        "fournisseur": {"type": "string", "description": "nom du fournisseur (de préférence tel que dans la liste)"},
+        "condition_reglement": {"type": "string"}, "magasin": {"type": "string"}, "observations": {"type": "string"},
+        "lignes": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "string", "description": "id de la ligne de la DA concernée"},
+            "inclure": {"type": "boolean", "description": "false si l'acheteur dit de ne pas commander la ligne"},
+            "quantite": {"type": "number"}, "prix_unitaire_ht": {"type": "number"},
+            "remise_pct": {"type": "number"}, "tva_pct": {"type": "number"}}, "required": ["id"]}}},
+        "required": ["lignes"]}}
+
+
+def remplir_bc(consigne: str, lignes: list[dict], fournisseurs: list[str], conditions: list[str],
+               actuel: dict) -> dict:
+    """Consigne de l'acheteur (écrite ou dictée) -> valeurs du BC (en-tête + lignes par id)."""
+    return structure(CONTEXTE_PWC + " Tu prépares un bon de commande pour un acheteur. Applique sa consigne aux "
+                     "lignes de la DA (id fournis) : prix unitaires HT en F CFA (« 185 mille » = 185000), remises, "
+                     "TVA (0 si exonéré), quantités, lignes à exclure ; fournisseur et conditions de règlement : "
+                     "reprends l'orthographe de la liste si possible. Ne renvoie que ce que la consigne indique.",
+                     json.dumps({"consigne": consigne, "lignes_da": lignes, "fournisseurs_connus": fournisseurs[:400],
+                                 "conditions_connues": conditions, "valeurs_actuelles": actuel},
+                                ensure_ascii=False, default=str), _OUTIL_BC)

@@ -4,7 +4,8 @@
 quantités) ; 3. recherche du BC correspondant (n° de BC cité, fournisseur, articles) ; 4. rapprochement ligne à
 ligne et écarts ; 5. enregistrement dans LIVRAISONS (workflow existant) et fiche du document dans DOCUMENTS, le
 fichier étant archivé dans Google Drive (documents.py).
-Accès : acheteurs et admin (tous les BC), demandeurs et chefs de service (BC de leur chantier ou de leurs DA).
+Accès : acheteurs et admin (tous les BC) ; magasiniers (onglet Magasin : BC de leur chantier). Chaque réception
+alimente aussi le stock du magasin du chantier (magasin.entrees_reception).
 """
 from __future__ import annotations
 
@@ -23,11 +24,14 @@ from sourcing import _plat, meme_fournisseur
 TOUS_LES_BC = {"Acheteur", "Admin"}
 
 
-def _bc_visibles(ctx) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _bc_visibles(ctx, chantier: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     from achats import _suivi_bc
     bc, bl = _suivi_bc(ctx)
     u = ctx.user
-    if u["Rôle"] not in TOUS_LES_BC:
+    if chantier:  # magasin : uniquement les BC de son chantier
+        bc = bc.loc[bc["Chantier"].map(as_text) == chantier]
+        bl = bl.loc[bl["ID_BC"].map(as_text).isin(set(bc["_id"])).astype(bool)]
+    elif u["Rôle"] not in TOUS_LES_BC:
         da = ctx.load("DA")
         mes_da = set(da.loc[(da["Demandeur"].map(as_text) == u["Nom"])
                             | ((da["Email Demandeur"].map(as_text) == as_text(u.get("Email")))
@@ -97,7 +101,7 @@ def _date_doc(doc: dict):
 
 
 # =========================================================================== écran
-def onglet_bl(ctx):
+def onglet_bl(ctx, chantier: str | None = None):
     st.caption("Importez le bon de livraison (photo ou PDF) : l'IA le lit, retrouve le bon de commande et prépare "
                "la réception ligne à ligne. Vous vérifiez, puis enregistrez.")
     if st.session_state.get("bl_msg"):
@@ -105,15 +109,16 @@ def onglet_bl(ctx):
     if not documents.configure() and ctx.user["Rôle"] == "Admin":
         st.info("Archivage des fichiers dans Google Drive non configuré : les BL sont lus et enregistrés, mais le "
                 "fichier n'est pas conservé. Voir apps_script_documents.gs (section [drive] des secrets).")
-    bc, bl = _bc_visibles(ctx)
+    bc, bl = _bc_visibles(ctx, chantier)
     vue = st.segmented_control("BL", ["Importer des BL", "BL enregistrés"], default="Importer des BL",
-                               key="bl-vue", label_visibility="collapsed") or "Importer des BL"
+                               key=f"bl-vue{'-' + chantier if chantier else ''}",
+                               label_visibility="collapsed") or "Importer des BL"
     if vue == "BL enregistrés":
-        _historique(ctx, bc)
+        _historique(ctx, bc, bool(chantier))
         return
     if not len(bc.loc[bc["Livraison"] != "Livré"]):
         st.info("Aucun bon de commande en attente de livraison" +
-                ("." if ctx.user["Rôle"] in TOUS_LES_BC else " pour votre chantier."))
+                ("." if ctx.user["Rôle"] in TOUS_LES_BC and not chantier else " pour ce chantier."))
         return
     v = st.session_state.get("bl_up_v", 0)
     fichiers = st.file_uploader("Bons de livraison", type=["jpg", "jpeg", "png", "webp", "pdf"],
@@ -275,10 +280,10 @@ def _index(lu: dict, ligne: dict) -> int:
     return -1
 
 
-def _historique(ctx, bc: pd.DataFrame):
+def _historique(ctx, bc: pd.DataFrame, restreint: bool = False):
     t = ctx.load("DOCUMENTS")
     t = t.loc[t["Type"].map(as_text) == "Bon de livraison"]
-    if ctx.user["Rôle"] not in TOUS_LES_BC:
+    if restreint or ctx.user["Rôle"] not in TOUS_LES_BC:
         t = t.loc[t["ID_BC"].map(as_text).isin(set(bc["_id"])).astype(bool)
                   | (t["Saisi par"].map(as_text) == ctx.user["Nom"])]
     if not len(t):

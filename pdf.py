@@ -9,7 +9,7 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import (Image, Paragraph, SimpleDocTemplate, Spacer, Table,
+from reportlab.platypus import (KeepTogether, Image, Paragraph, SimpleDocTemplate, Spacer, Table,
                                 TableStyle)
 
 from logic import as_text, fmt_date
@@ -91,87 +91,122 @@ def build_pdf(da: dict, lignes: list[dict], refs: dict) -> bytes:
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm,
                             topMargin=12 * mm, bottomMargin=15 * mm,
                             title=numero or "Demande d'achat", author="PWC")
-    story = []
-
-    # ---- en-tête documentaire
-    logo = _logo_flowable()
-    ref = _p("Référence : SC/ADM/LOG/QHSE/TECH-PWC-ExB-01\nCréation : 05/11/2025\nRévision :\n"
-             "Accessibilité : Tous les services\nVersion : 01", "ref")
-    head = Table([[logo, _p("ASSURER LES COMMANDES", "t1"), ref],
-                  ["", _p("FICHE D’EXPRESSION DE BESOIN OU DE DEMANDE D’ACHAT", "t2"), ""]],
-                 colWidths=[42 * mm, 88 * mm, 50 * mm], rowHeights=[11 * mm, 11 * mm])
-    head.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.8, GRID),
-        ("SPAN", (0, 0), (0, 1)), ("SPAN", (2, 0), (2, 1)),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (0, 1), "CENTER"),
-    ]))
-    story += [head, Paragraph("INFORMATIONS DE LA DEMANDE", _s["sec"])]
-
-    chantier = as_text(da.get("Chantier"))
-    service = as_text(da.get("Service Demandeur"))
-    info = Table([
-        [_p("DEMANDE D'ACHAT N°", "lab"), _p(numero, "lab"),
-         _p("CHANTIER", "lab"), _p(refs.get("chantiers", {}).get(chantier, chantier))],
-        [_p("DATE", "lab"), _p(fmt_date(da.get("Date DA"))), _p("CODE DA", "lab"), _p(da.get("Code DA"))],
-        [_p("SERVICE DEMANDEUR", "lab"), _p(refs.get("services", {}).get(service, service)),
-         _p("NOM DU RESPONSABLE DU SERVICE DEMANDEUR", "lab"), _p(da.get("Responsable"))],
-        [_p("PRIORITÉ", "lab"), _p(da.get("Priorité")), _p("DATE DE BESOIN", "lab"), _p(fmt_date(da.get("Date besoin")))],
-    ], colWidths=[38 * mm, 52 * mm, 38 * mm, 52 * mm])
-    info.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.8, GRID),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
-    story += [info, Paragraph("DÉTAIL DES BESOINS", _s["sec"])]
-
-    # ---- lignes d'articles
-    th = ["N°", "CODE PARC", "DÉSIGNATION", "RÉFÉRENCE", "COLISAGE (unité / paquet / ml / kg)",
-          "QUANTITÉ", "USAGE"]
-    data = [[_p(h, "th") for h in th]]
     lignes = sorted(lignes, key=lambda l: float(l.get("N° Ligne") or 0))
-    for l in lignes:
-        data.append([_p(as_text(l.get("N° Ligne")), "cellc"), _p(l.get("Code_Parc"), "cellc"),
-                     _p(l.get("Désignation")), _p(l.get("Référence"), "cellc"),
-                     _p(l.get("Colisage"), "cellc"), _p(_qte(l.get("Quantité")), "cellc"),
-                     _p(l.get("Usage"))])
-    for n in range(len(lignes) + 1, max(NB_LIGNES_MIN, len(lignes)) + 1):
-        data.append([_p(str(n), "cellc"), "", "", "", "", "", ""])
-    det = Table(data, colWidths=[9 * mm, 20 * mm, 52 * mm, 25 * mm, 22 * mm, 18 * mm, 34 * mm],
-                repeatRows=1)
-    det.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.8, GRID),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 1), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 1), (-1, -1), 4),
-    ]))
-    story += [det]
 
-    # ---- visas
-    story.append(Paragraph("VISAS", _s["sec"]))
-    v_dem = _p(f"Nom : {as_text(da.get('Demandeur'))}\nDate : {fmt_date(da.get('Date DA'))}\nSignature :")
-    visa_resp = as_text(da.get("Visa Resp. service"))
-    v_resp = _p(f"Nom : {visa_resp or as_text(da.get('Responsable'))}\n"
-                f"Date : {fmt_date(da.get('Date visa Resp. service'))}\n"
-                + ("Validé dans l'application" if visa_resp else "Signature :"))
-    dg_ok = statut in ("Validée DG", "Validée")
-    v_val = _p(f"Nom : {as_text(da.get('Validé par')) if dg_ok else ''}\n"
-               f"Date : {fmt_date(da.get('Date validation')) if dg_ok else ''}\n"
-               + ("Validé dans l'application" if dg_ok else "Signature :"))
-    visas = Table([[_p(h, "th") for h in ["LE DEMANDEUR", "VISA RESPONSABLE DU SERVICE",
-                                           "VALIDATION DIRECTION GÉNÉRALE"]],
-                   [v_dem, v_resp, v_val]],
-                  colWidths=[60 * mm] * 3, rowHeights=[None, 30 * mm])
-    visas.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.8, GRID),
-        ("VALIGN", (0, 0), (-1, 0), "MIDDLE"), ("VALIGN", (0, 1), (-1, 1), "TOP"),
-    ]))
-    story.append(visas)
+    def compose(n_vides: int, compact: int) -> list:
+        """compact : 0 = normal ; 1, 2, 3 = interlignes et police du détail resserrés pour tenir sur 1 page."""
+        story = []
+        pad = (4, 2, 1.5, 1)[compact]
+        taille = (8.5, 8, 7.2, 6.5)[compact]
+        sl = ParagraphStyle(f"dl{compact}", parent=_s["cell"], fontSize=taille, leading=taille + 1.4)
+        sc = ParagraphStyle(f"dc{compact}", parent=_s["cellc"], fontSize=taille, leading=taille + 1.4)
 
-    obs = as_text(da.get("Observations"))
-    if obs:
-        story += [Spacer(1, 3 * mm), _p(f"Observations : {obs}")]
-    if statut == "Rejetée" and as_text(da.get("Motif rejet")):
-        story += [Spacer(1, 2 * mm), _p(f"Motif du rejet : {as_text(da.get('Motif rejet'))}")]
+        def cel(v, centre=False):
+            t = as_text(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            return Paragraph(t, sc if centre else sl)
+
+        # ---- en-tête documentaire
+        logo = _logo_flowable()
+        ref = _p("Référence : SC/ADM/LOG/QHSE/TECH-PWC-ExB-01\nCréation : 05/11/2025\nRévision :\n"
+                 "Accessibilité : Tous les services\nVersion : 01", "ref")
+        head = Table([[logo, _p("ASSURER LES COMMANDES", "t1"), ref],
+                      ["", _p("FICHE D’EXPRESSION DE BESOIN OU DE DEMANDE D’ACHAT", "t2"), ""]],
+                     colWidths=[42 * mm, 88 * mm, 50 * mm], rowHeights=[11 * mm, 11 * mm])
+        head.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.8, GRID),
+            ("SPAN", (0, 0), (0, 1)), ("SPAN", (2, 0), (2, 1)),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (0, 0), (0, 1), "CENTER"),
+        ]))
+        story += [head, Paragraph("INFORMATIONS DE LA DEMANDE", _s["sec"])]
+
+        chantier = as_text(da.get("Chantier"))
+        service = as_text(da.get("Service Demandeur"))
+        info = Table([
+            [_p("DEMANDE D'ACHAT N°", "lab"), _p(numero, "lab"),
+             _p("CHANTIER", "lab"), _p(refs.get("chantiers", {}).get(chantier, chantier))],
+            [_p("DATE", "lab"), _p(fmt_date(da.get("Date DA"))), _p("CODE DA", "lab"), _p(da.get("Code DA"))],
+            [_p("SERVICE DEMANDEUR", "lab"), _p(refs.get("services", {}).get(service, service)),
+             _p("NOM DU RESPONSABLE DU SERVICE DEMANDEUR", "lab"), _p(da.get("Responsable"))],
+            [_p("PRIORITÉ", "lab"), _p(da.get("Priorité")), _p("DATE DE BESOIN", "lab"), _p(fmt_date(da.get("Date besoin")))],
+        ], colWidths=[38 * mm, 52 * mm, 38 * mm, 52 * mm])
+        info.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.8, GRID),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story += [info, Paragraph("DÉTAIL DES BESOINS", _s["sec"])]
+
+        # ---- lignes d'articles
+        th = ["N°", "CODE PARC", "DÉSIGNATION", "RÉFÉRENCE", "COLISAGE\n(unité / ml / kg)", "QUANTITÉ", "USAGE"]
+        data = [[_p(h, "th") for h in th]]
+        for l in lignes:
+            data.append([cel(l.get("N° Ligne"), True), cel(l.get("Code_Parc"), True),
+                         cel(l.get("Désignation")), cel(l.get("Référence"), True),
+                         cel(l.get("Colisage"), True), cel(_qte(l.get("Quantité")), True),
+                         cel(l.get("Usage"))])
+        for n in range(len(lignes) + 1, len(lignes) + n_vides + 1):
+            data.append([cel(n, True), "", "", "", "", "", ""])
+        det = Table(data, colWidths=[8 * mm, 17 * mm, 48 * mm, 24 * mm, 20 * mm, 18 * mm, 45 * mm],
+                    repeatRows=1)
+        det.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.8, GRID),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 1), (-1, -1), pad),
+            ("BOTTOMPADDING", (0, 1), (-1, -1), pad),
+        ]))
+        story += [det]
+
+        # ---- visas
+        titre_visas = Paragraph("VISAS", _s["sec"])
+        v_dem = _p(f"Nom : {as_text(da.get('Demandeur'))}\nDate : {fmt_date(da.get('Date DA'))}\nSignature :")
+        visa_resp = as_text(da.get("Visa Resp. service"))
+        v_resp = _p(f"Nom : {visa_resp or as_text(da.get('Responsable'))}\n"
+                    f"Date : {fmt_date(da.get('Date visa Resp. service'))}\n"
+                    + ("Validé dans l'application" if visa_resp else "Signature :"))
+        dg_ok = statut in ("Validée DG", "Validée")
+        v_val = _p(f"Nom : {as_text(da.get('Validé par')) if dg_ok else ''}\n"
+                   f"Date : {fmt_date(da.get('Date validation')) if dg_ok else ''}\n"
+                   + ("Validé dans l'application" if dg_ok else "Signature :"))
+        visas = Table([[_p(h, "th") for h in ["LE DEMANDEUR", "VISA RESPONSABLE DU SERVICE",
+                                               "VALIDATION DIRECTION GÉNÉRALE"]],
+                       [v_dem, v_resp, v_val]],
+                      colWidths=[60 * mm] * 3, rowHeights=[None, (30, 24, 20, 18)[compact] * mm])
+        visas.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.8, GRID),
+            ("VALIGN", (0, 0), (-1, 0), "MIDDLE"), ("VALIGN", (0, 1), (-1, 1), "TOP"),
+        ]))
+        story.append(KeepTogether([titre_visas, visas]))  # le bloc des visas ne se coupe jamais
+
+        obs = as_text(da.get("Observations"))
+        if obs:
+            story += [Spacer(1, 3 * mm), _p(f"Observations : {obs}")]
+        if statut == "Rejetée" and as_text(da.get("Motif rejet")):
+            story += [Spacer(1, 2 * mm), _p(f"Motif du rejet : {as_text(da.get('Motif rejet'))}")]
+
+
+        return story
+
+    def hauteur(story) -> float:
+        h = 0.0
+        for f in story:
+            if isinstance(f, KeepTogether):
+                h += hauteur(f._content)
+            else:
+                h += f.wrap(doc.width, doc.height)[1] + f.getSpaceBefore() + f.getSpaceAfter()
+        return h
+
+    # Une seule page tant que les 15 lignes du formulaire ne sont pas toutes remplies : les cases grandissent
+    # avec le texte, et les lignes vides ne complètent que la place restante (quitte à ne pas les afficher).
+    # Au-delà de 15 articles, la fiche continue sur une 2e page.
+    dispo = doc.height - 12 - 2 * mm
+    if len(lignes) < NB_LIGNES_MIN:
+        compact = next((c for c in range(4) if hauteur(compose(0, c)) <= dispo), 3)
+        base = hauteur(compose(0, compact))
+        h_vide = hauteur(compose(1, compact)) - base
+        n = max(0, min(NB_LIGNES_MIN - len(lignes), int((dispo - base) // h_vide) if h_vide > 0 else 0))
+        story = compose(n, compact)
+    else:
+        story = compose(0, 0)
 
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
     return buf.getvalue()

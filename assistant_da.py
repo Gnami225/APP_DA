@@ -116,25 +116,26 @@ def panneau(ctx, user: dict, nb_a_valider: int = 0):
             conversation(ctx, user)
 
 
-def _aide(user):
-    h = st.session_state.setdefault("ada-aide", [])
+def _aide(user, guide: str = GUIDE, cle: str = "ada", role_ia: str = "l'assistant de saisie des demandes d'achat",
+          exemple: str = "Ex. : comment corriger une DA rejetée ? que faire si l'article n'est pas dans la liste ?"):
+    h = st.session_state.setdefault(f"{cle}-aide", [])
     for m in h[-6:]:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
-    v = st.session_state.get("ada-aide-v", 0)
+    v = st.session_state.get(f"{cle}-aide-v", 0)
     c1, c2 = st.columns([5, 1])
-    q = c1.text_input("Question", key=f"ada-q-{v}", label_visibility="collapsed",
-                      placeholder="Ex. : comment corriger une DA rejetée ? que faire si l'article n'est pas dans la liste ?")
-    if c2.button("Demander", key=f"ada-go-{v}", disabled=not q.strip()):
+    q = c1.text_input("Question", key=f"{cle}-q-{v}", label_visibility="collapsed",
+                      placeholder=exemple)
+    if c2.button("Demander", key=f"{cle}-go-{v}", disabled=not q.strip()):
         h.append({"role": "user", "content": q.strip()})
         try:
-            rep = ia.discuter(ia.CONTEXTE_PWC + " Tu es l'assistant de saisie des demandes d'achat. Réponds en 2 à 5 "
+            rep = ia.discuter(ia.CONTEXTE_PWC + " Tu es " + role_ia + ". Réponds en 2 à 5 "
                               f"phrases simples, pratiques. Tu t'adresses à {salutation(user).replace('Bonjour ', '')}."
-                              f"\n\n{GUIDE}", h[-8:])
+                              f"\n\n{guide}", h[-8:])
         except ia.IAErreur as e:
             rep = f"⚠️ {e}"
         h.append({"role": "assistant", "content": rep})
-        st.session_state["ada-aide-v"] = v + 1
+        st.session_state[f"{cle}-aide-v"] = v + 1
         st.rerun()
 
 
@@ -161,6 +162,18 @@ def conseils(ctx, lignes: list[dict], priorite: str, date_besoin) -> list[str]:
         if c in q.index and q.at[c, "count"] >= 3 and q.at[c, "median"] > 0 and to_num(l["Quantité"]) > 3 * q.at[c, "median"]:
             out.append(f"Quantité inhabituelle pour {l['Désignation']} : {to_num(l['Quantité']):g} demandés, "
                        f"{q.at[c, 'median']:g} d'habitude. Vérifiez.")
+    try:
+        import magasin
+        noms = ctx.refs()["chantiers"]
+        for l in lignes:
+            if as_text(l.get("Code Article")):
+                d = magasin.disponible(ctx, l["Code Article"])
+                if d:
+                    out.append(f"{l['Désignation']} {l.get('Référence', '')} est en stock : "
+                               + ", ".join(f"{q:g} au magasin {noms.get(m, m)}" for m, q in d)
+                               + " — un transfert peut éviter un achat.")
+    except Exception:
+        pass
     if date_besoin:
         j = (date_besoin - date.today()).days
         if j <= 3 and priorite == "Normale":
