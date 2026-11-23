@@ -511,8 +511,10 @@ def _choisir(cle: str, valeur: str):
     st.session_state[cle] = valeur
 
 
-def choisir_article(prefix: str):
+def choisir_article(prefix: str, version: int = 0):
     """Désignation puis référence (liste filtrée) : choisir dans le catalogue ou saisir librement.
+    `version` renouvelle le champ Référence (après un ajout, la désignation reste choisie : on peut enchaîner
+    plusieurs références de la même désignation).
     Retourne (désignation, référence, code article, colisage par défaut, clés des widgets à vider)."""
     load("ARTICLES")
     cat, refs_de = _catalogue(version_donnees())  # désignation -> {référence -> code article}
@@ -535,7 +537,7 @@ def choisir_article(prefix: str):
     # 2) Référence : liste filtrée sur la désignation choisie, ou saisie libre
     refs_dispo = refs_de.get(des, {}) if connue else {}
     opts = sorted(r for r in refs_dispo if r)
-    cle_ref = f"{prefix}-ref-{des or ''}"
+    cle_ref = f"{prefix}-ref-{des or ''}-{version}"
     ref = st.selectbox("Référence", opts, index=None, accept_new_options=True, key=cle_ref, disabled=not des,
                        placeholder=(f"{len(opts)} référence(s) pour cette désignation : choisir ou taper"
                                     if opts else "Taper la référence (facultatif)"))
@@ -701,9 +703,13 @@ def onglet_nouvelle(user: dict):
     hist = load("HISTORIQUE_ARTICLES")
     parcs = sorted((set(load("PARC")["Code_Parc"].map(as_text)) | set(hist["Code_Parc"].map(as_text))) - {""})
     da_par_ia(parcs)
-    des, ref, code, col_def, (_, cle_ref) = choisir_article("art")
+    nb = len(st.session_state.lignes)
+    des, ref, code, col_def, (_, cle_ref) = choisir_article("art", nb)
+    if nb and des:
+        st.caption("Astuce : la désignation reste choisie après un ajout — choisissez une autre référence pour "
+                   "ajouter un second article de la même désignation, ou changez de désignation.")
 
-    with st.form(f"ajout-{des or ''}-{ref}", clear_on_submit=True):
+    with st.form(f"ajout-{des or ''}-{ref}-{nb}", clear_on_submit=True):
         a1, a2 = st.columns(2)
         colis = a1.selectbox("Colisage", COLISAGES, index=COLISAGES.index(col_def) if col_def in COLISAGES else 0)
         qte = a2.number_input("Quantité", min_value=0.0, step=1.0, value=1.0)
@@ -718,8 +724,7 @@ def onglet_nouvelle(user: dict):
                     "Code Article": code or "", "Désignation": des, "Référence": ref,
                     "Code_Parc": (parc or "").strip(), "Colisage": colis,
                     "Quantité": qte, "Usage": usage.strip()})
-                st.session_state.pop("art-des", None)
-                st.session_state.pop(cle_ref, None)
+                st.session_state.pop(cle_ref, None)  # la désignation reste : enchaîner une autre référence
                 st.rerun()
 
     for i, l in enumerate(st.session_state.lignes):
@@ -842,8 +847,9 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
         cle_aj = f"mod-aj-{id_da}"
         st.session_state.setdefault(cle_aj, [])
         st.markdown("###### Ajouter un article")
-        des, ref, code, col_def, cles = choisir_article(f"modart-{id_da}")
-        with st.form(f"mod-form-{id_da}-{des or ''}-{ref}", clear_on_submit=True):
+        nb_aj = len(st.session_state[cle_aj])
+        des, ref, code, col_def, cles = choisir_article(f"modart-{id_da}", nb_aj)
+        with st.form(f"mod-form-{id_da}-{des or ''}-{ref}-{nb_aj}", clear_on_submit=True):
             a1, a2, a3, a4 = st.columns(4)
             colis = a1.selectbox("Colisage", COLISAGES, index=COLISAGES.index(col_def) if col_def in COLISAGES else 0)
             qte = a2.number_input("Quantité", min_value=0.0, step=1.0, value=1.0)
@@ -856,8 +862,7 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
                     st.session_state[cle_aj].append({"Code Article": code or "", "Désignation": des, "Référence": ref,
                                                      "Code_Parc": parc.strip().upper(), "Colisage": colis,
                                                      "Quantité": qte, "Usage": usage.strip()})
-                    for c in cles:
-                        st.session_state.pop(c, None)
+                    st.session_state.pop(cles[1], None)  # la désignation reste choisie
                     st.rerun()
         for i, l in enumerate(st.session_state[cle_aj]):
             a, b = st.columns([6, 1])
