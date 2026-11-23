@@ -115,8 +115,24 @@ def _creer(**kw):
         except anthropic.APIConnectionError:
             raise IAErreur("IA injoignable : vérifiez la connexion internet.")
         except anthropic.APIStatusError as e:
-            raise IAErreur(f"Erreur du service IA ({e.status_code}) : réessayez.")
+            msg = _message_api(e)
+            if e.status_code == 400 and "web" in msg.lower() and "search" in msg.lower():
+                raise IAErreur("Recherche web non activée pour votre organisation : dans la Claude Console "
+                               "(platform.claude.com), Settings > Privacy (ou Organisation), activez « Web search », "
+                               f"puis relancez. Détail : {msg}")
+            if e.status_code == 400 and ("credit" in msg.lower() or "balance" in msg.lower()):
+                raise IAErreur(f"Crédits API insuffisants : rechargez dans la Claude Console (Billing). Détail : {msg}")
+            raise IAErreur(f"Erreur du service IA ({e.status_code}) : {msg or 'réessayez.'}")
     raise IAErreur(f"Aucun modèle Claude disponible avec cette clé ({derniere}).")
+
+
+def _message_api(e) -> str:
+    """Message lisible renvoyé par l'API (sans données sensibles)."""
+    try:
+        b = e.body if isinstance(e.body, dict) else {}
+        return as_text((b.get("error") or {}).get("message") or getattr(e, "message", ""))[:300]
+    except Exception:
+        return as_text(getattr(e, "message", ""))[:300]
 
 
 def _texte(resp) -> str:
