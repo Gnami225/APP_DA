@@ -274,7 +274,7 @@ _OUTIL_EXTRAIRE = {
             "unite": {"type": "string", "description": "unité dite (sac, tonne, litre, unité…) ou vide"},
             "engin": {"type": "string", "description": "engin ou véhicule concerné, tel que dit (ex. camion 12)"},
             "usage": {"type": "string", "description": "usage ou destination, déduit du texte si possible"}},
-        "required": ["designation", "quantite"]}},
+        "required": ["texte", "designation", "designation_doc", "reference_doc", "quantite"]}},
         "entete": {"type": "object", "description": "si indiqué (formulaire de DA, liste écrite…)", "properties": {
             "priorite": {"type": "string", "enum": ["Normale", "Urgente", "Critique"]},
             "date_besoin": {"type": "string", "description": "AAAA-MM-JJ"},
@@ -321,13 +321,63 @@ def analyser_document_da(nom: str, contenu: bytes, art: pd.DataFrame, parc: pd.D
                      art, parc, colisages, version, rapide=False)
 
 
+_OUTIL_DECOUPER = {
+    "name": "decouper_libelles",
+    "description": "Découpage de chaque libellé en nature de l'article + reste du libellé.",
+    "input_schema": {"type": "object", "properties": {"lignes": {"type": "array", "items": {
+        "type": "object", "properties": {
+            "index": {"type": "integer"},
+            "designation": {"type": "string", "description": "NATURE de l'article, MAJUSCULES, singulier, sans "
+                                                             "accent, abréviation de type développée (DPN → "
+                                                             "DISJONCTEUR), qualificatif qui change l'article inclus "
+                                                             "(DISJONCTEUR DIFFERENTIEL, PRISE ETANCHE, GLOBE DE DOUCHE)"},
+            "reference": {"type": "string", "description": "le RESTE du libellé, mot pour mot (calibre, dimension, "
+                                                           "puissance, marque, variante), sans « de » initial"},
+            "unite": {"type": "string", "description": "unité si le libellé l'indique (paquet, rouleau…), sinon vide"}},
+        "required": ["index", "designation", "reference"]}}}, "required": ["lignes"]}}
+
+EXEMPLES_DECOUPAGE = """Exemples :
+« DPN de 20 Ampères LE Grand » → DISJONCTEUR | 20 Ampères LE Grand
+« DPN inter différentiel de 63 Ampères LE Grand monophasé » → DISJONCTEUR DIFFERENTIEL | 63 Ampères LE Grand monophasé
+« Prises étanches encastrées » → PRISE ETANCHE | encastrées
+« Contacts simples V/V » → INTERRUPTEUR SIMPLE VA-ET-VIENT | V/V
+« Globes Led de 18 W » → GLOBE | Led 18 W
+« Paquets de dominos N°10 LE Grand » → DOMINO | N°10 LE Grand (unité : paquet)
+« Barre de bornet de terre » → BARRE DE TERRE | bornet"""
+
+
+def decouper_libelles(textes: list[str]) -> list[dict]:
+    """Libellés bruts -> [{designation, reference, unite}] (même ordre)."""
+    if not textes:
+        return []
+    r = structure(CONTEXTE_PWC + " Découpe chaque libellé d'article : désignation = nature de l'article (propre), "
+                  "référence = le reste du libellé recopié mot pour mot. " + EXEMPLES_DECOUPAGE,
+                  json.dumps([{"index": i, "libelle": t} for i, t in enumerate(textes)], ensure_ascii=False),
+                  _OUTIL_DECOUPER, rapide=True)
+    par = {x.get("index"): x for x in r.get("lignes", [])}
+    return [par.get(i, {}) for i in range(len(textes))]
+
+
 def _analyser(contenu, art, parc, colisages, version, rapide) -> tuple[list[dict], dict]:
     ex = structure(CONTEXTE_PWC + " Extrais chaque article demandé, avec sa quantité ; et l'en-tête s'il est "
-                   "indiqué (priorité, date de besoin, observations).", contenu, _OUTIL_EXTRAIRE, rapide=rapide)
+                   "indiqué (priorité, date de besoin, observations). Pour chaque ligne, remplis designation_doc "
+                   "(nature de l'article) et reference_doc (reste du libellé mot pour mot). " + EXEMPLES_DECOUPAGE
+                   + " Usage : déduis-le de l'objet du document s'il n'est pas précisé (ex. « Travaux "
+                   "d'électricité »).", contenu, _OUTIL_EXTRAIRE, rapide=rapide)
     besoins = ex.get("articles") or []
     entete = ex.get("entete") or {}
     if not besoins:
         return [], entete
+    manque = [i for i, b in enumerate(besoins) if not as_text(b.get("designation_doc")) and as_text(b.get("texte"))]
+    if manque:  # découpage nature / reste du libellé non fourni : appel dédié
+        try:
+            for i, d in zip(manque, decouper_libelles([as_text(besoins[i]["texte"]) for i in manque])):
+                besoins[i]["designation_doc"] = as_text(d.get("designation"))
+                besoins[i]["reference_doc"] = as_text(d.get("reference"))
+                if as_text(d.get("unite")) and not as_text(besoins[i].get("unite")):
+                    besoins[i]["unite"] = as_text(d["unite"])
+        except IAErreur:
+            pass
     cand = [candidats(art, f"{b.get('designation', '')} {b.get('caracteristiques', '')}", 12, version)
             for b in besoins]
     parcs = [f"{as_text(c)} = {as_text(d)}" for c, d in zip(parc["Code_Parc"], parc["Désignation engin"])
