@@ -260,6 +260,15 @@ _OUTIL_EXTRAIRE = {
             "texte": {"type": "string", "description": "RECOPIE EXACTE de la ligne telle qu'écrite (désignation "
                                                       "complète, même orthographe, sans la quantité ni le prix)"},
             "designation": {"type": "string", "description": "type d'article, ex. PNEU, FILTRE A GASOIL, CIMENT"},
+            "designation_doc": {"type": "string", "description": (
+                "NATURE de l'article telle que sur le document, propre : en MAJUSCULES, au singulier, abréviation "
+                "de type développée (DPN → DISJONCTEUR ; « Prises » → PRISE ; « Paquets de dominos » → DOMINO), "
+                "avec le qualificatif qui change l'article (DISJONCTEUR DIFFERENTIEL, PRISE ETANCHE, GLOBE DE "
+                "DOUCHE, SPOT ENCASTRE). Sans calibre, dimension, marque ni quantité.")},
+            "reference_doc": {"type": "string", "description": (
+                "le RESTE du libellé du document, recopié tel qu'écrit (mêmes mots, même orthographe) : calibre, "
+                "dimension, puissance, marque, variante. Ex. « DPN de 20 Ampères LE Grand » → « 20 Ampères LE Grand » ; "
+                "« Globes Led de 18 W » → « Led 18 W ». Vide s'il ne reste rien.")},
             "caracteristiques": {"type": "string", "description": "dimensions, référence, marque, norme…"},
             "quantite": {"type": "number"},
             "unite": {"type": "string", "description": "unité dite (sac, tonne, litre, unité…) ou vide"},
@@ -304,8 +313,10 @@ def analyser_document_da(nom: str, contenu: bytes, art: pd.DataFrame, parc: pd.D
     return _analyser([bloc_fichier(nom, contenu),
                       {"type": "text", "text": "Document : demande, devis ou liste de besoins d'un chantier. Lis TOUTES "
                                                "les lignes dans l'ordre (même manuscrites) ; dans « texte », recopie "
-                                               "chaque désignation exactement comme écrite, sans corriger ni "
-                                               "reformuler ; quantité exacte de la colonne Qté." + (f" Précision : {consigne}" if consigne
+                                               "chaque désignation exactement comme écrite ; sépare-la en "
+                                               "designation_doc (nature de l'article, propre) et reference_doc "
+                                               "(le reste, mot pour mot) ; quantité exacte de la colonne Qté ; "
+                                               "unité si écrite (paquet, rouleau, m², sac…)." + (f" Précision : {consigne}" if consigne
                                                                                 else "")}],
                      art, parc, colisages, version, rapide=False)
 
@@ -350,7 +361,10 @@ def _analyser(contenu, art, parc, colisages, version, rapide) -> tuple[list[dict
                        "Code_Parc": as_text(c.get("code_parc")) or as_text(b.get("engin")).upper(),
                        "Usage": as_text(b.get("usage")), "Statut": statut,
                        "Confiance": as_text(c.get("confiance")), "À vérifier": as_text(c.get("remarque")),
-                       "Texte": as_text(b.get("texte"))})
+                       "Texte": as_text(b.get("texte")),
+                       "Désignation doc": " ".join(as_text(b.get("designation_doc")).upper().split()),
+                       "Référence doc": " ".join(as_text(b.get("reference_doc")).split()),
+                       "Unité doc": as_text(b.get("unite"))})
     return lignes, entete
 
 
