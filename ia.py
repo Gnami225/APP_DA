@@ -257,7 +257,8 @@ _OUTIL_EXTRAIRE = {
     "description": "Liste des articles demandés dans le texte.",
     "input_schema": {"type": "object", "properties": {"articles": {"type": "array", "items": {
         "type": "object", "properties": {
-            "texte": {"type": "string", "description": "passage d'origine"},
+            "texte": {"type": "string", "description": "RECOPIE EXACTE de la ligne telle qu'écrite (désignation "
+                                                      "complète, même orthographe, sans la quantité ni le prix)"},
             "designation": {"type": "string", "description": "type d'article, ex. PNEU, FILTRE A GASOIL, CIMENT"},
             "caracteristiques": {"type": "string", "description": "dimensions, référence, marque, norme…"},
             "quantite": {"type": "number"},
@@ -301,8 +302,10 @@ def analyser_document_da(nom: str, contenu: bytes, art: pd.DataFrame, parc: pd.D
                          version=0, consigne: str = "") -> tuple[list[dict], dict]:
     """Photo / PDF (DA papier, liste manuscrite, devis, capture…) -> (lignes de DA, en-tête lu)."""
     return _analyser([bloc_fichier(nom, contenu),
-                      {"type": "text", "text": "Document : demande ou liste de besoins d'un chantier. Lis toutes les "
-                                               "lignes (même manuscrites)." + (f" Précision : {consigne}" if consigne
+                      {"type": "text", "text": "Document : demande, devis ou liste de besoins d'un chantier. Lis TOUTES "
+                                               "les lignes dans l'ordre (même manuscrites) ; dans « texte », recopie "
+                                               "chaque désignation exactement comme écrite, sans corriger ni "
+                                               "reformuler ; quantité exacte de la colonne Qté." + (f" Précision : {consigne}" if consigne
                                                                                 else "")}],
                      art, parc, colisages, version, rapide=False)
 
