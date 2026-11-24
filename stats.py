@@ -56,6 +56,13 @@ def _lignes(ctx) -> pd.DataFrame:
     df["mois"] = df["date"].dt.strftime("%Y-%m")
     df["famille"] = df["code"].map(lambda c: fam.get(c, "") or HORS)
     df["four"] = df["four"].str.upper().str.split().str.join(" ").replace("", "NON RENSEIGNÉ")
+    try:  # fournisseurs fusionnés (doublons) : regroupés sous le nom retenu
+        import auto_ia
+        alias = auto_ia.alias_fournisseurs(ctx)
+        if alias:
+            df["four"] = df["four"].map(lambda x: alias.get(x, x))
+    except Exception:
+        pass
     df["chantier"] = df["chantier"].replace("", "NON RENSEIGNÉ")
     df["cle"] = [c if c else "T:" + f"{d}|{r}".upper() for c, d, r in zip(df["code"], df["des"], df["ref"])]
     df["article"] = df["des"] + df["ref"].map(lambda r: f" · {r}" if r else "")

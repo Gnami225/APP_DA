@@ -48,6 +48,8 @@ TABLES = {
                          "Unité", "Quantité", "Code_Parc", "Bénéficiaire", "Motif", "ID_BC", "N° BC", "N° BL",
                          "ID_Livraison", "ID_Transfert", "Magasin lié", "Statut", "Valeur unitaire", "Saisi par",
                          "Créé le"],
+    # actions automatiques de l'IA sur les référentiels (catalogue, fournisseurs) : annulables
+    "JOURNAL_IA": ["ID_Action", "Date", "Objet", "Action", "Détail", "Confiance", "Annulation", "Statut", "Par"],
     # résultats du sourcing (base interne + recherche web), gardés pour ne pas relancer la même recherche
     "SOURCING": ["ID_Sourcing", "Clé article", "Désignation", "Référence", "Zones", "Date", "Résultats",
                  "Nb recherches", "Par"],
@@ -112,6 +114,7 @@ PARAMETRES_DEFAUT = {  # valeurs initiales, modifiables dans Administration > Pa
     "Préfixe BC": "BC-",
     "Préfixe TCP": "TCP-",
     "Seuil alerte prix (%)": "15",
+    "Catalogage automatique IA": "Oui",
     "Délai traitement DA (jours)": "3",
     "Délai livraison attendu (jours)": "15",
     "Sourcing : recherches web max par article": "5",

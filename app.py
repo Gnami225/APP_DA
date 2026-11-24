@@ -565,6 +565,23 @@ def choisir_article(prefix: str, version: int = 0):
     return des, ref, code, col_def, [f"{prefix}-des", cle_ref]
 
 
+def _catalogage_auto(user: dict, id_da: str):
+    """Articles hors catalogue de la DA : catalogués tout de suite par l'IA si elle est certaine (annulable)."""
+    ctx = contexte(user)
+    if not ia.disponible() or as_text(achats.params(ctx).get("Catalogage automatique IA")).lower() == "non":
+        return
+    ctx.refresh(False)  # les propositions viennent d'être écrites
+    p = ctx.load("ARTICLES_A_CATALOGUER")
+    if not ((p["ID_DA"].map(as_text) == id_da) & (p["Statut"].map(as_text) == "À analyser")).any():
+        return
+    try:
+        with st.spinner("Catalogage des nouveaux articles par l'IA…"):
+            import auto_ia
+            auto_ia.cataloguer_auto(ctx, id_da)
+    except Exception:  # ne bloque jamais la soumission : l'administrateur traitera
+        pass
+
+
 def _colisage_doc(unite_doc, defaut) -> str:
     """Unité écrite sur le document (paquets, rouleaux, m²…) -> colisage de la liste, sinon celui proposé."""
     u = as_text(unite_doc).lower().replace("²", "2").replace("³", "3").strip().rstrip("s").rstrip("x")
@@ -850,6 +867,7 @@ def onglet_nouvelle(user: dict):
                                  user))
             journaliser(j)
             catalogage.enregistrer(contexte(user), da_row, rows, user)
+            _catalogage_auto(user, as_text(da_row.get("ID_DA")))
             refresh(statique=False)
             pdf = build_pdf(da_row, rows, r)
         chef = chef_du_service(service)
@@ -1012,6 +1030,7 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
             nouvelles = lignes_da(d, ajouts, premier)
             store.append("HISTORIQUE_ARTICLES", nouvelles)
             catalogage.enregistrer(contexte(user), d, nouvelles, user)
+            _catalogage_auto(user, as_text(d.get("ID_DA")))
         circuit_maj = {} if admin else {**depart, "Motif rejet": "", "Validé par": "", "Date validation": ""}
         store.update("DA", "ID_DA", id_da, {**circuit_maj, "Observations": obs.strip(), "Priorité": prio,
                                             "Date besoin": besoin.isoformat() if besoin else ""})
@@ -1420,8 +1439,11 @@ def onglet_admin_da(user: dict):
 
 
 def onglet_admin(user: dict):
-    t1, t5, t2, t3, t4 = st.tabs(["Demandes d'achat", "Articles à cataloguer", "Utilisateurs & accès", "Paramètres",
-                                  "Archivage"])
+    t1, t5, t6, t2, t3, t4 = st.tabs(["Demandes d'achat", "Articles à cataloguer", "🤖 IA référentiels",
+                                      "Utilisateurs & accès", "Paramètres", "Archivage"])
+    with t6:
+        import auto_ia
+        auto_ia.onglet_ia_referentiels(contexte(user))
     with t1:
         onglet_admin_da(user)
     with t5:

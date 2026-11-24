@@ -138,14 +138,16 @@ def _table_decisions(ctx, attente: pd.DataFrame, art: pd.DataFrame):
          .agg(Colisage=("Colisage", "last"), Demandes=("ID_Proposition", "size"),
               Demandeurs=("Saisi par", lambda x: ", ".join(dict.fromkeys(map(as_text, x)))),
               **{"DA / BC": ("N° DA", lambda x: ", ".join(dict.fromkeys(map(as_text, x))))},
-              ids=("ID_Proposition", lambda x: "|".join(map(as_text, x))))
+              ids=("ID_Proposition", lambda x: "|".join(map(as_text, x))),
+              Note=("Commentaire", lambda x: next((as_text(c) for c in x if as_text(c)), "")))
          .reset_index().sort_values("Demandes", ascending=False))
     v = pd.DataFrame({
         "ids": g["ids"], "Désignation saisie": g["Désignation"], "Référence saisie": g["Référence"],
         "Demandes": g["Demandes"], "DA / BC": g["DA / BC"], "Demandeurs": g["Demandeurs"],
         "Article proche du catalogue": [proche(d, r) for d, r in zip(g["Désignation"], g["Référence"])],
         "Décision": "", "Désignation retenue": g["Désignation"], "Référence retenue": g["Référence"],
-        "Famille": "", "Colisage": g["Colisage"].map(as_text), "Code à rattacher": ""})
+        "Famille": "", "Colisage": g["Colisage"].map(as_text), "Code à rattacher": "",
+        "Proposition IA (auto)": g["Note"]})
     version = st.session_state.get("cat_v", 0)
     from schema import COLISAGES
     import ia
@@ -184,7 +186,7 @@ def _table_decisions(ctx, attente: pd.DataFrame, art: pd.DataFrame):
         version = f"{version}-{len(props)}"
     ed = st.data_editor(
         v, hide_index=True, width="stretch", key=f"cat-ed-{version}",
-        disabled=["Désignation saisie", "Référence saisie", "Demandes", "DA / BC", "Demandeurs",
+        disabled=["Désignation saisie", "Référence saisie", "Demandes", "DA / BC", "Demandeurs", "Proposition IA (auto)",
                   "Article proche du catalogue", "Avis IA"],
         column_config={
             "ids": None,

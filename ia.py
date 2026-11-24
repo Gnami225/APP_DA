@@ -471,8 +471,12 @@ _OUTIL_CATALOGUE = {
             "code": {"type": "string", "description": "si Rattacher : code du candidat identique"},
             "designation": {"type": "string"}, "reference": {"type": "string"},
             "famille": {"type": "string", "description": "si Intégrer : famille parmi la liste"},
+            "colisage": {"type": "string", "description": "unité de commande usuelle"},
+            "confiance": {"type": "string", "enum": ["haute", "moyenne", "faible"], "description": (
+                "haute UNIQUEMENT si certain : Rattacher = exactement le même article (même type, même calibre / "
+                "dimension / référence) ; Intégrer = article clairement nouveau et famille évidente")},
             "justification": {"type": "string"}},
-        "required": ["index", "decision"]}}}, "required": ["decisions"]}}
+        "required": ["index", "decision", "confiance"]}}}, "required": ["decisions"]}}
 
 
 def proposer_catalogage(items: list[dict], art: pd.DataFrame, familles: list[str], version=0) -> list[dict]:
@@ -631,3 +635,27 @@ def remplir_bc(consigne: str, lignes: list[dict], fournisseurs: list[str], condi
                      json.dumps({"consigne": consigne, "lignes_da": lignes, "fournisseurs_connus": fournisseurs[:400],
                                  "conditions_connues": conditions, "valeurs_actuelles": actuel},
                                 ensure_ascii=False, default=str), _OUTIL_BC)
+
+
+_OUTIL_FOURN = {
+    "name": "fusions_fournisseurs",
+    "description": "Groupes de noms qui désignent la MÊME société.",
+    "input_schema": {"type": "object", "properties": {"groupes": {"type": "array", "items": {
+        "type": "object", "properties": {
+            "index": {"type": "integer"},
+            "meme_societe": {"type": "boolean"},
+            "noms": {"type": "array", "items": {"type": "string"}, "description": "noms du groupe qui sont la même "
+                                                                                  "société (sous-ensemble)"},
+            "nom_retenu": {"type": "string", "description": "nom officiel propre, en MAJUSCULES, forme juridique à la fin"},
+            "justification": {"type": "string"}}, "required": ["index", "meme_societe"]}}},
+        "required": ["groupes"]}}
+
+
+def verifier_doublons_fournisseurs(groupes: list[list[dict]]) -> list[dict]:
+    """groupes : [[{nom, achats, telephone, email}…]…] candidats proches -> verdict de l'IA par groupe."""
+    r = structure(CONTEXTE_PWC + " Pour chaque groupe de fournisseurs aux noms proches, dis s'il s'agit de la même "
+                  "société (fautes de frappe, forme juridique, abréviation, sigle). Deux sociétés différentes au nom "
+                  "voisin ne doivent PAS être regroupées. Propose le nom officiel à retenir.",
+                  json.dumps([{"index": i, "fournisseurs": g} for i, g in enumerate(groupes)], ensure_ascii=False,
+                             default=str), _OUTIL_FOURN)
+    return r.get("groupes", [])

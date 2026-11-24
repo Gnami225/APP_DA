@@ -214,3 +214,14 @@ article » (5 par défaut).
   dictée (« chez SOCOCE, pneus à 185 mille, 5 % de remise, pas les bâches, paiement 30 jours fin de mois ») et / ou
   proforma en photo / PDF : fournisseur, conditions, magasin, observations (n° de proforma), prix, remises, TVA,
   quantités et lignes à exclure sont préremplis ; consignes successives possibles ; vérification puis « Émettre ».
+
+## IA de fond sur les référentiels (24/11/2026)
+- **Catalogage automatique** à chaque soumission / modification de DA : les articles hors catalogue sont rattachés
+  ou intégrés par l'IA **seulement si elle est certaine** (confiance haute) ; sinon ils restent dans « Articles à
+  cataloguer » avec la colonne « Proposition IA (auto) ». Paramètre « Catalogage automatique IA » (Oui / Non).
+- **Administration > 🤖 IA référentiels** : cataloguer tout ce qui est en attente ; fournisseurs (spécialités déduites
+  des achats, doublons détectés puis **fusion validée par l'admin**, fiches complétées par recherche web — champs vides
+  seulement) ; **Journal IA** avec **annulation** de chaque action.
+- Fusion de fournisseurs : fiches doublons « Fusionné » (inactives), BC renommés, historique regroupé dans les analyses.
+- Table **JOURNAL_IA** (créée automatiquement). Annuler un « Intégrer » rétablit les lignes et la proposition ; la
+  fiche article créée reste au catalogue (rien n'est supprimé).
