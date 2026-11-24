@@ -116,7 +116,8 @@ def _creer(**kw):
             raise IAErreur("IA injoignable : vérifiez la connexion internet.")
         except anthropic.APIStatusError as e:
             msg = _message_api(e)
-            if e.status_code == 400 and "web" in msg.lower() and "search" in msg.lower():
+            if e.status_code == 400 and "web search" in msg.lower() and any(
+                    x in msg.lower() for x in ("not enabled", "disabled", "not allowed", "enable")):
                 raise IAErreur("Recherche web non activée pour votre organisation : dans la Claude Console "
                                "(platform.claude.com), Settings > Privacy (ou Organisation), activez « Web search », "
                                f"puis relancez. Détail : {msg}")
@@ -520,7 +521,9 @@ def recherche_web(system: str, consigne: str, outil: dict, max_recherches: int =
     Renvoie (résultat, URLs réellement consultées, nombre de recherches)."""
     derniere = None
     for version in ("web_search_20250305", "web_search_20260318", "web_search_20260209"):
-        outil_web = {"type": version, "name": "web_search", "max_uses": int(max_recherches), "user_location": LIEU_PWC}
+        # pas de « user_location » : le code pays CI n'est pas accepté par l'API ; la priorité Côte d'Ivoire /
+        # Afrique de l'Ouest est donnée dans la consigne de recherche
+        outil_web = {"type": version, "name": "web_search", "max_uses": int(max_recherches)}
         if version != "web_search_20250305":
             outil_web["allowed_callers"] = ["direct"]  # recherche appelée directement (pas via exécution de code)
         try:
