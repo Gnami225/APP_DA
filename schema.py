@@ -31,7 +31,8 @@ TABLES = {
     "BC": ["ID_BC", "N° BC", "Date BC", "ID_DA", "N° DA", "Chantier", "Code Parc", "Magasin", "Fournisseur",
            "Condition règlement", "Total HT", "Taux TVA", "Montant TVA", "Total TTC", "Statut", "Acheteur",
            "Validé par", "Date validation", "Motif rejet", "ID_TCP", "N° TCP", "Observations", "Créé le",
-           "Statut livraison", "Date livraison", "Modifié le", "Modifié par"],
+           "Statut livraison", "Date livraison", "Modifié le", "Modifié par", "Total HT brut", "Remise globale %",
+           "Remise globale (F)"],
     "BC_LIGNES": ["ID_LigneBC", "ID_BC", "N° BC", "N° Ligne", "ID_Ligne_DA", "Code Article", "Désignation",
                   "Référence", "Code_Parc", "Unité", "Quantité", "Prix unitaire HT", "Remise %", "Montant HT",
                   "Fournisseur", "Date BC", "Chantier", "N° DA", "TVA %", "Montant TVA",
@@ -48,6 +49,9 @@ TABLES = {
                          "Unité", "Quantité", "Code_Parc", "Bénéficiaire", "Motif", "ID_BC", "N° BC", "N° BL",
                          "ID_Livraison", "ID_Transfert", "Magasin lié", "Statut", "Valeur unitaire", "Saisi par",
                          "Créé le"],
+    # consommation de l'API Claude (estimation par appel)
+    "CONSO_IA": ["Date", "Utilisateur", "Fonction", "Modèle", "Jetons entrée", "Jetons sortie", "Recherches web",
+                 "Coût estimé $"],
     # actions automatiques de l'IA sur les référentiels (catalogue, fournisseurs) : annulables
     "JOURNAL_IA": ["ID_Action", "Date", "Objet", "Action", "Détail", "Confiance", "Annulation", "Statut", "Par"],
     # résultats du sourcing (base interne + recherche web), gardés pour ne pas relancer la même recherche
@@ -117,8 +121,9 @@ PARAMETRES_DEFAUT = {  # valeurs initiales, modifiables dans Administration > Pa
     "Catalogage automatique IA": "Oui",
     "Délai traitement DA (jours)": "3",
     "Délai livraison attendu (jours)": "15",
-    "Sourcing : recherches web max par article": "5",
-    "Sourcing : validité des résultats (jours)": "30",
+    "Sourcing : recherches web max par article": "3",
+    "Sourcing : validité des résultats (jours)": "60",
+    "Sourcing : articles max par lancement": "10",
     "Familles sans alerte prix": "TRANSPORT & LOGISTIQUE; FRAIS ADMIN. VÉHICULES; RÉPARATIONS & ENTRETIEN ENGINS; "
                                  "LOCATION ENGINS & MATÉRIEL",
 }

@@ -221,7 +221,7 @@ def cache(ctx, cle: str, zones: list[str]) -> dict | None:
         d = datetime.fromisoformat(as_text(r["Date"])[:19])
     except ValueError:
         return None
-    if (datetime.now() - d).days > _p(ctx, "Sourcing : validité des résultats (jours)", 30):
+    if (datetime.now() - d).days > _p(ctx, "Sourcing : validité des résultats (jours)", 60):
         return None
     try:
         return {**json.loads(as_text(r["Résultats"])), "date": as_text(r["Date"])[:10], "par": as_text(r["Par"])}
@@ -247,7 +247,7 @@ def chercher_web(ctx, l: dict, zones: list[str]) -> dict:
             "dans source_url ; laisse vide un contact non trouvé. 3 à 8 fournisseurs au total, en excluant les "
             "fournisseurs déjà connus.")
     res, urls, nb = ia.recherche_web(sysm, json.dumps(consigne, ensure_ascii=False), _OUTIL_FOURNISSEURS,
-                                     int(_p(ctx, "Sourcing : recherches web max par article", 5)))
+                                     int(_p(ctx, "Sourcing : recherches web max par article", 3)))
     out = []
     for f in res.get("fournisseurs", [])[:10]:
         nom = " ".join(as_text(f.get("nom")).upper().split())
@@ -343,8 +343,17 @@ def vue_sourcing(ctx):
         a, b = st.columns([2, 1])
         relancer = b.checkbox("Ignorer les résultats récents", key="src-force",
                               help="Relance la recherche même si l'article a été cherché récemment (coût IA)")
-        if a.button(f"🌐 Rechercher de nouveaux fournisseurs sur Internet ({len(choisis)} article(s))",
+        nmax = int(_p(ctx, "Sourcing : articles max par lancement", 10))
+        nrech = int(_p(ctx, "Sourcing : recherches web max par article", 3))
+        en_cache = 0 if relancer else sum(1 for i in choisis if cache(ctx, cle_article(recs[i]), zones))
+        a_chercher = max(0, min(len(choisis), nmax) - en_cache)
+        st.caption(f"💰 Estimation : {a_chercher} article(s) à chercher × {nrech} recherche(s) max ≈ "
+                   f"{0.10 * nrech / 3 * a_chercher:.2f} à {0.20 * nrech / 3 * a_chercher:.2f} $"
+                   + (f" ({en_cache} déjà en mémoire, gratuits)" if en_cache else "")
+                   + (f" — limité à {nmax} articles par lancement" if len(choisis) > nmax else ""))
+        if a.button(f"🌐 Rechercher de nouveaux fournisseurs sur Internet ({min(len(choisis), nmax)} article(s))",
                     type="primary", disabled=not choisis or not zones, key=f"src-go-{da['_id']}"):
+            choisis = choisis[:nmax]
             barre = st.progress(0.0, text="Recherche web…")
             for n, i in enumerate(choisis):
                 l = recs[i]

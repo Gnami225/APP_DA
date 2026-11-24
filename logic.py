@@ -175,11 +175,17 @@ def tva_ligne(l: dict, taux_defaut: float = 0) -> float:
     return montant_ligne(l.get("Quantité"), l.get("Prix unitaire HT"), l.get("Remise %")) * taux / 100
 
 
-def totaux(lignes: list[dict], taux_tva: float = 0, appliquer_tva: bool = True) -> dict:
-    """Totaux du BC ; la TVA est calculée ligne par ligne (taux propre à chaque article)."""
-    ht = round(sum(montant_ligne(l.get("Quantité"), l.get("Prix unitaire HT"), l.get("Remise %")) for l in lignes))
-    tva = round(sum(tva_ligne(l, taux_tva) for l in lignes)) if appliquer_tva else 0
-    return {"Total HT": ht, "Montant TVA": tva, "Total TTC": ht + tva}
+def totaux(lignes: list[dict], taux_tva: float = 0, appliquer_tva: bool = True, remise_globale: float = 0) -> dict:
+    """Totaux du BC ; la TVA est calculée ligne par ligne (taux propre à chaque article).
+    remise_globale (%) : remise commerciale sur le total HT (après les remises des lignes) ; la TVA est calculée sur
+    le HT net (chaque ligne réduite du même pourcentage). « Total HT » = HT net à payer."""
+    brut = round(sum(montant_ligne(l.get("Quantité"), l.get("Prix unitaire HT"), l.get("Remise %")) for l in lignes))
+    rg = min(max(to_num(remise_globale), 0.0), 100.0)
+    remise = round(brut * rg / 100)
+    ht = brut - remise
+    tva = round(sum(tva_ligne(l, taux_tva) for l in lignes) * (1 - rg / 100)) if appliquer_tva else 0
+    return {"Total HT brut": brut, "Remise globale %": rg, "Remise globale (F)": remise, "Total HT": ht,
+            "Montant TVA": tva, "Total TTC": ht + tva}
 
 
 def numero_bc(prefixe: str, numero: int) -> str:

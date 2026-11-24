@@ -225,3 +225,13 @@ article » (5 par défaut).
 - Fusion de fournisseurs : fiches doublons « Fusionné » (inactives), BC renommés, historique regroupé dans les analyses.
 - Table **JOURNAL_IA** (créée automatiquement). Annuler un « Intégrer » rétablit les lignes et la proposition ; la
   fiche article créée reste au catalogue (rien n'est supprimé).
+
+## Coûts IA, sourcing réservé à l'admin, remise globale BC (24/11/2026)
+- **🔎 Sourcing** : administrateurs uniquement. Réglages économes : 3 recherches web par article, résultats gardés
+  60 jours, 10 articles max par lancement, estimation du coût affichée avant de lancer (Paramètres « Sourcing : … »).
+- **💰 Consommation IA** (Administration > 🤖 IA référentiels) : coût estimé par mois, par fonction et par utilisateur
+  (table CONSO_IA, écrite par lots). La facture exacte reste dans la Claude Console (Usage).
+- **Remise globale sur le BC** : en % ou en montant, sur le total HT (après remises des lignes) ; TVA sur le HT net ;
+  affichée à l'émission, en modification, sur le PDF (Total HT brut / Remise globale / Total HT net / TVA / TTC) ;
+  lue sur la proforma ou dictée à l'IA ; prix nets et statistiques tiennent compte de la remise.
+  Colonnes BC ajoutées : Total HT brut, Remise globale %, Remise globale (F).

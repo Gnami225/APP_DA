@@ -65,6 +65,8 @@ def base_prix(ctx) -> pd.DataFrame:
         "q": h["Quantité"].map(to_num), "pu": h["PU net HT"].map(to_num), "chantier": h["Chantier"].map(as_text)})
     bc, bl = ctx.load("BC"), ctx.load("BC_LIGNES")
     val = set(bc.loc[bc["Statut"].map(as_text) == "Validé", "ID_BC"].map(as_text))
+    f_rg = {as_text(i): 1 - to_num(r) / 100 for i, r in zip(bc["ID_BC"], bc["Remise globale %"])} \
+        if "Remise globale %" in bc.columns else {}  # remise globale du BC répartie sur les prix
     bl = bl.loc[bl["ID_BC"].map(as_text).isin(val).astype(bool)]
     deja = set(a["bc"])
     bl = bl.loc[~bl["N° BC"].map(as_text).isin(deja).astype(bool)]  # pas de doublon après archivage
@@ -72,7 +74,8 @@ def base_prix(ctx) -> pd.DataFrame:
         "date": bl["Date BC"].map(to_date), "bc": bl["N° BC"].map(as_text), "four": bl["Fournisseur"].map(as_text),
         "code": bl["Code Article"].map(as_text), "des": bl["Désignation"].map(as_text),
         "ref": bl["Référence"].map(as_text), "unite": bl["Unité"].map(as_text), "q": bl["Quantité"].map(to_num),
-        "pu": [to_num(p) * (1 - to_num(r) / 100) for p, r in zip(bl["Prix unitaire HT"], bl["Remise %"])],
+        "pu": [to_num(p) * (1 - to_num(r) / 100) * f_rg.get(as_text(i), 1)
+               for p, r, i in zip(bl["Prix unitaire HT"], bl["Remise %"], bl["ID_BC"])],
         "chantier": bl["Chantier"].map(as_text)})
     df = pd.concat([a, b], ignore_index=True)
     df["pu"] = pd.to_numeric(df["pu"], errors="coerce").fillna(0.0)  # séries vides : type texte par défaut
@@ -247,6 +250,8 @@ def importer(ctx, fichier) -> str:
 def archive_vers_historique(ctx, bc: pd.DataFrame, bl: pd.DataFrame):
     """Avant de retirer une année de la base : les prix des BC validés passent dans PRIX_HISTORIQUE."""
     val = set(bc.loc[bc["Statut"].map(as_text) == "Validé", "ID_BC"].map(as_text))
+    f_rg = {as_text(i): 1 - to_num(r) / 100 for i, r in zip(bc["ID_BC"], bc["Remise globale %"])} \
+        if "Remise globale %" in bc.columns else {}  # remise globale du BC répartie sur les prix
     bl = bl.loc[bl["ID_BC"].map(as_text).isin(val).astype(bool)]
     art = ctx.load("ARTICLES")
     fam = dict(zip(art["Code Article"].map(as_text), art["Famille"].map(as_text)))
@@ -256,7 +261,8 @@ def archive_vers_historique(ctx, bc: pd.DataFrame, bl: pd.DataFrame):
              "Famille": fam.get(as_text(r["Code Article"]), ""), "Unité": as_text(r["Unité"]),
              "Quantité": to_num(r["Quantité"]), "PU HT": to_num(r["Prix unitaire HT"]),
              "Remise %": to_num(r["Remise %"]),
-             "PU net HT": round(to_num(r["Prix unitaire HT"]) * (1 - to_num(r["Remise %"]) / 100), 2),
+             "PU net HT": round(to_num(r["Prix unitaire HT"]) * (1 - to_num(r["Remise %"]) / 100)
+                                * f_rg.get(as_text(r["ID_BC"]), 1), 2),
              "Libellé d'origine": "", "Source": "BC app (archivé)"} for _, r in bl.iterrows()
             if to_num(r["Prix unitaire HT"]) > 0]
     if rows:

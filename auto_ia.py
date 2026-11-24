@@ -288,7 +288,8 @@ def onglet_ia_referentiels(ctx):
         st.success(st.session_state.pop("aia_msg"))
     if not ia.disponible():
         st.info("IA non configurée (section [ia] des secrets).")
-    vue = st.segmented_control("Vue", ["📦 Catalogue", "🏢 Fournisseurs", "📜 Journal IA"], default="📦 Catalogue",
+    vue = st.segmented_control("Vue", ["📦 Catalogue", "🏢 Fournisseurs", "📜 Journal IA", "💰 Consommation IA"],
+                               default="📦 Catalogue",
                                key="aia-vue", label_visibility="collapsed") or "📦 Catalogue"
     if vue == "📦 Catalogue":
         p = ctx.load("ARTICLES_A_CATALOGUER")
@@ -361,6 +362,8 @@ def onglet_ia_referentiels(ctx):
                     out.append(f"{lab[c]} : {e}")
             st.session_state.aia_msg = " · ".join(out)
             st.rerun()
+    elif vue == "💰 Consommation IA":
+        vue_conso(ctx)
     else:
         j = ctx.load("JOURNAL_IA")
         if not len(j):
@@ -376,3 +379,39 @@ def onglet_ia_referentiels(ctx):
         if sel and st.button("↩️ Annuler cette action", key="aia-ann-go"):
             st.session_state.aia_msg = annuler(ctx, sel)
             st.rerun()
+
+
+def vue_conso(ctx):
+    """Coût estimé de l'API Claude par fonction et par utilisateur (tarifs indicatifs ; la facture exacte est dans la
+    Claude Console, page Usage)."""
+    from datetime import date
+    ia.vider_conso()
+    ctx.refresh(False)
+    c = ctx.load("CONSO_IA")
+    if not len(c):
+        st.info("Aucun appel enregistré pour l'instant (le compteur démarre avec cette version).")
+        return
+    c = c.assign(mois=c["Date"].map(lambda x: as_text(x)[:7]), cout=c["Coût estimé $"].map(to_num),
+                 rw=c["Recherches web"].map(to_num))
+    mois = sorted(set(c["mois"]), reverse=True)
+    m = st.selectbox("Mois", mois, index=mois.index(date.today().strftime("%Y-%m")) if
+                     date.today().strftime("%Y-%m") in mois else 0, key="conso-mois")
+    v = c.loc[c["mois"] == m]
+    k = st.columns(4)
+    k[0].metric("Coût estimé du mois", f"{v['cout'].sum():.2f} $")
+    k[1].metric("En F CFA (≈ 580 F / $)", f"{v['cout'].sum() * 580:,.0f} F".replace(",", " "))
+    k[2].metric("Appels", len(v))
+    k[3].metric("Recherches web", int(v["rw"].sum()))
+    a, b = st.columns(2)
+    with a:
+        st.markdown("###### Par fonction")
+        st.dataframe(v.groupby("Fonction").agg(Appels=("cout", "size"), **{"Coût $": ("cout", "sum"),
+                                                                           "Recherches web": ("rw", "sum")})
+                     .sort_values("Coût $", ascending=False).round(3), width="stretch")
+    with b:
+        st.markdown("###### Par utilisateur")
+        st.dataframe(v.assign(Utilisateur=v["Utilisateur"].map(lambda x: as_text(x) or "(automatique)"))
+                     .groupby("Utilisateur").agg(Appels=("cout", "size"), **{"Coût $": ("cout", "sum")})
+                     .sort_values("Coût $", ascending=False).round(3), width="stretch")
+    st.caption("Estimation à partir des jetons consommés et des tarifs publics ; la facture exacte est dans la Claude "
+               "Console (page Usage). Les appels sont enregistrés par lots (quelques minutes de décalage possible).")

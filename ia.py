@@ -104,7 +104,9 @@ def _creer(**kw):
     derniere = None
     for m in _modeles(kw.pop("rapide", False)):
         try:
-            return _client(c["api_key"]).messages.create(model=m, **kw)
+            resp = _client(c["api_key"]).messages.create(model=m, **kw)
+            _compter(m, resp)
+            return resp
         except anthropic.NotFoundError as e:
             derniere = e
             continue
@@ -125,6 +127,77 @@ def _creer(**kw):
                 raise IAErreur(f"Crédits API insuffisants : rechargez dans la Claude Console (Billing). Détail : {msg}")
             raise IAErreur(f"Erreur du service IA ({e.status_code}) : {msg or 'réessayez.'}")
     raise IAErreur(f"Aucun modèle Claude disponible avec cette clé ({derniere}).")
+
+
+# =========================================================================== consommation (compteur)
+# Tarifs indicatifs en $ par million de jetons (entrée, sortie) ; recherche web : 0,01 $ par recherche.
+TARIFS = {"claude-sonnet-5-5": (2.0, 10.0), "claude-sonnet-5": (2.0, 10.0), "claude-sonnet-4-6": (3.0, 15.0),
+          "claude-haiku-5-5": (0.10, 0.50), "claude-haiku-4-5": (1.0, 5.0)}
+PRIX_RECHERCHE = 0.01
+FONCTIONS = {
+    "chercher_web": "Sourcing Internet", "completer_fiche": "Fiche fournisseur (web)",
+    "verifier_doublons_fournisseurs": "Doublons fournisseurs", "cataloguer_auto": "Catalogage automatique",
+    "proposer_catalogage": "Catalogage (propositions)", "ui": "Assistant d'analyse", "commentaire": "Commentaire de période",
+    "_tour": "DA en conversation", "_aide": "Aide (questions)", "da_par_ia": "DA par l'IA (texte / document)",
+    "_bc_ia": "BC par l'IA", "_lecture_tcp": "Lecture devis (TCP)", "ui_lecture": "Lecture de document",
+    "_traiter": "Réception BL (lecture)", "onglet_bl": "Réception BL (lecture)", "_sorties": "Magasin : sortie dictée",
+    "_inventaire": "Magasin : inventaire dicté", "_relance": "Relance fournisseur", "_cb": "Reformulation motif",
+    "vue_sourcing": "Cotations (sourcing)", "_table_decisions": "Catalogage (propositions)",
+    "_catalogage_auto": "Catalogage automatique"}
+_JOURNAL = {"lignes": [], "depuis": None, "store": None}
+
+
+def brancher_conso(get_store):
+    """L'application fournit l'accès à la base pour enregistrer la consommation (table CONSO_IA)."""
+    _JOURNAL["store"] = get_store
+
+
+def _appelant() -> str:
+    """Fonction de l'application à l'origine de l'appel (pour le compteur de consommation)."""
+    import inspect
+    pile = inspect.stack()[2:40]
+    for f in pile:
+        if f.function in FONCTIONS:
+            return FONCTIONS[f.function]
+    for f in pile:
+        if not f.filename.endswith("/ia.py") and "streamlit" not in f.filename:
+            return f"{f.filename.rsplit('/', 1)[-1][:-3]}.{f.function}"
+    return "?"
+
+
+def _compter(modele: str, resp):
+    try:
+        u = resp.usage
+        e, s_ = int(getattr(u, "input_tokens", 0) or 0), int(getattr(u, "output_tokens", 0) or 0)
+        e += int(getattr(u, "cache_read_input_tokens", 0) or 0) + int(getattr(u, "cache_creation_input_tokens", 0) or 0)
+        stu = getattr(u, "server_tool_use", None)
+        rw = int(getattr(stu, "web_search_requests", 0) or 0) if stu else 0
+        pe, ps = TARIFS.get(modele, (3.0, 15.0))
+        try:
+            nom = as_text(st.session_state.get("user", {}).get("Nom"))
+        except Exception:
+            nom = ""
+        from datetime import datetime
+        _JOURNAL["lignes"].append({"Date": datetime.now().isoformat(timespec="seconds"), "Utilisateur": nom,
+                                   "Fonction": _appelant(), "Modèle": modele, "Jetons entrée": e, "Jetons sortie": s_,
+                                   "Recherches web": rw,
+                                   "Coût estimé $": round(e / 1e6 * pe + s_ / 1e6 * ps + rw * PRIX_RECHERCHE, 5)})
+        _JOURNAL["depuis"] = _JOURNAL["depuis"] or datetime.now()
+        if len(_JOURNAL["lignes"]) >= 8 or (datetime.now() - _JOURNAL["depuis"]).seconds > 120:
+            vider_conso()
+    except Exception:
+        pass
+
+
+def vider_conso():
+    """Écrit les appels mémorisés dans CONSO_IA (par lots : pas d'écriture à chaque appel)."""
+    if not _JOURNAL["lignes"] or not _JOURNAL["store"]:
+        return
+    lignes, _JOURNAL["lignes"], _JOURNAL["depuis"] = _JOURNAL["lignes"], [], None
+    try:
+        _JOURNAL["store"]().append("CONSO_IA", lignes)
+    except Exception:
+        _JOURNAL["lignes"] = lignes + _JOURNAL["lignes"]
 
 
 def _message_api(e) -> str:
@@ -442,6 +515,8 @@ _OUTIL_DOC = {
             "tva_pct": {"type": "number"}, "montant_ht": {"type": "number"}},
             "required": ["designation"]}},
         "total_ht": {"type": "number"}, "total_ttc": {"type": "number"},
+        "remise_globale_pct": {"type": "number", "description": "remise globale (%) sur le total, si indiquée"},
+        "remise_globale_montant": {"type": "number", "description": "remise globale en F, si indiquée en montant"},
         "conditions": {"type": "string", "description": "conditions de paiement / délai si indiqués"},
         "remarques": {"type": "string", "description": "éléments illisibles ou douteux"}},
         "required": ["lignes"]}}
@@ -672,6 +747,9 @@ _OUTIL_BC = {
     "input_schema": {"type": "object", "properties": {
         "fournisseur": {"type": "string", "description": "nom du fournisseur (de préférence tel que dans la liste)"},
         "condition_reglement": {"type": "string"}, "magasin": {"type": "string"}, "observations": {"type": "string"},
+        "remise_globale_pct": {"type": "number", "description": "remise globale en % sur le total HT, si demandée "
+                                                                "(une remise globale en montant : convertis-la en % du "
+                                                                "total HT des lignes)"},
         "lignes": {"type": "array", "items": {"type": "object", "properties": {
             "id": {"type": "string", "description": "id de la ligne de la DA concernée"},
             "inclure": {"type": "boolean", "description": "false si l'acheteur dit de ne pas commander la ligne"},

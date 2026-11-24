@@ -321,6 +321,8 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
         h = max(c.wrap(w - 12, 1000)[1] for c, w in zip(row, cw))
         hauteurs.append(max(h_std, h + 2 * pad + 1))
     place = NB_LIGNES_BC * h_std - sum(hauteurs[1:])
+    if to_num(bc.get("Remise globale (F)")) > 0:  # 2 lignes de plus dans les totaux
+        place -= 2 * 6 * mm
     vides = max(0, int(place // h_std))
     data += [[""] * 9 for _ in range(vides)]
     hauteurs += [h_std] * vides
@@ -341,21 +343,30 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     cond.__init__(cond.text.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>"), cond.style)
     obs = as_text(bc.get("Observations"))
     p_obs = _p(f"Observations : {obs}" if obs else "", "bc_l")
-    h_obs = max(12 * mm, p_obs.wrap(sum(cw[:5]) - 12, 1000)[1] + 8)  # observations longues : la case s'agrandit
-    pied = Table([
-        [cond, "", _p("TOTAL HT", "bc_rb"), _p(fmt_montant(bc.get("Total HT")), "bc_rb")],
-        [p_obs, "", _p(lib_tva, "bc_rb"),
-         _p(fmt_montant(bc.get("Montant TVA")), "bc_rb")],
-        ["", "", _p("TOTAL TTC", "bc_rb"), _p(fmt_montant(bc.get("Total TTC")), "bc_rb")],
-        [_p("Mentionner T.V.A sur facture\nExemplaire à joindre à la facture", "bc_i"), "", _p(visa, "bc_i"), ""],
-    ], colWidths=[sum(cw[:4]), cw[4], cw[5] + cw[6] + cw[7], cw[8]],
-       rowHeights=[6 * mm, 6 * mm, h_obs - 6 * mm, 20 * mm])
+    rem = to_num(bc.get("Remise globale (F)"))
+    if rem > 0:  # remise globale sur le total HT
+        tots = [("TOTAL HT BRUT", fmt_montant(bc.get("Total HT brut"))),
+                (f"REMISE GLOBALE ({_qte(to_num(bc.get('Remise globale %')))} %)", "- " + fmt_montant(rem)),
+                ("TOTAL HT NET", fmt_montant(bc.get("Total HT"))), (lib_tva, fmt_montant(bc.get("Montant TVA"))),
+                ("TOTAL TTC", fmt_montant(bc.get("Total TTC")))]
+    else:
+        tots = [("TOTAL HT", fmt_montant(bc.get("Total HT"))), (lib_tva, fmt_montant(bc.get("Montant TVA"))),
+                ("TOTAL TTC", fmt_montant(bc.get("Total TTC")))]
+    nt = len(tots)
+    h_obs = max((nt - 1) * 6 * mm, p_obs.wrap(sum(cw[:5]) - 12, 1000)[1] + 8)  # observations longues : la case s'agrandit
+    data = [[cond if i == 0 else (p_obs if i == 1 else ""), "", _p(l, "bc_rb"), _p(v, "bc_rb")]
+            for i, (l, v) in enumerate(tots)]
+    data.append([_p("Mentionner T.V.A sur facture\nExemplaire à joindre à la facture", "bc_i"), "", _p(visa, "bc_i"), ""])
+    hauteurs = [6 * mm] * nt + [20 * mm]
+    hauteurs[nt - 1] = h_obs - (nt - 2) * 6 * mm
+    pied = Table(data, colWidths=[sum(cw[:4]), cw[4], cw[5] + cw[6] + cw[7], cw[8]], rowHeights=hauteurs)
     pied.setStyle(TableStyle([
         ("BOX", (0, 0), (-1, -1), 0.8, GRID),
-        ("GRID", (2, 0), (3, 2), 0.6, GRID),
-        ("LINEABOVE", (0, 3), (-1, 3), 0.8, GRID), ("LINEBEFORE", (2, 3), (2, 3), 0.8, GRID),
-        ("SPAN", (0, 0), (1, 0)), ("SPAN", (0, 1), (1, 2)), ("SPAN", (0, 3), (1, 3)), ("SPAN", (2, 3), (3, 3)),
-        ("VALIGN", (0, 0), (-1, 2), "MIDDLE"), ("VALIGN", (0, 3), (-1, 3), "TOP"), ("VALIGN", (0, 1), (1, 2), "TOP"),
+        ("GRID", (2, 0), (3, nt - 1), 0.6, GRID),
+        ("LINEABOVE", (0, nt), (-1, nt), 0.8, GRID), ("LINEBEFORE", (2, nt), (2, nt), 0.8, GRID),
+        ("SPAN", (0, 0), (1, 0)), ("SPAN", (0, 1), (1, nt - 1)), ("SPAN", (0, nt), (1, nt)), ("SPAN", (2, nt), (3, nt)),
+        ("VALIGN", (0, 0), (-1, nt - 1), "MIDDLE"), ("VALIGN", (0, nt), (-1, nt), "TOP"),
+        ("VALIGN", (0, 1), (1, nt - 1), "TOP"),
     ]))
     story.append(pied)
     pied_page = _pied_pwc(societe, numero, avert)

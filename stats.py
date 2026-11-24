@@ -37,6 +37,9 @@ def _lignes(ctx) -> pd.DataFrame:
     a["montant"] = a["q"] * a["pu"]
     bc, bl = ctx.load("BC"), ctx.load("BC_LIGNES")
     st_bc = dict(zip(bc["ID_BC"].map(as_text), bc["Statut"].map(as_text)))
+    # remise globale du BC (sur le total HT) : répartie sur les lignes -> prix et montants nets réels
+    f_rg = {as_text(i): 1 - to_num(r) / 100 for i, r in zip(bc["ID_BC"], bc.get("Remise globale %", pd.Series(
+        [0] * len(bc), index=bc.index)))}
     bl = bl.loc[bl["Statut livraison"].map(as_text) != LIGNE_BC_RETIREE]
     bl = bl.loc[~bl["N° BC"].map(as_text).isin(set(a["bc"]))]
     b = pd.DataFrame({
@@ -44,8 +47,10 @@ def _lignes(ctx) -> pd.DataFrame:
         "chantier": bl["Chantier"].map(lambda c: noms_ch.get(as_text(c), as_text(c))),
         "code": bl["Code Article"].map(as_text), "des": bl["Désignation"].map(as_text),
         "ref": bl["Référence"].map(as_text), "unite": bl["Unité"].map(as_text), "q": bl["Quantité"].map(to_num),
-        "pu": [to_num(p) * (1 - to_num(r) / 100) for p, r in zip(bl["Prix unitaire HT"], bl["Remise %"])],
-        "montant": bl["Montant HT"].map(to_num), "statut": bl["ID_BC"].map(lambda i: st_bc.get(as_text(i), "")),
+        "pu": [to_num(p) * (1 - to_num(r) / 100) * f_rg.get(as_text(i), 1)
+               for p, r, i in zip(bl["Prix unitaire HT"], bl["Remise %"], bl["ID_BC"])],
+        "montant": [to_num(m) * f_rg.get(as_text(i), 1) for m, i in zip(bl["Montant HT"], bl["ID_BC"])],
+        "statut": bl["ID_BC"].map(lambda i: st_bc.get(as_text(i), "")),
         "source": "Application"})
     b = b.loc[b["statut"].isin(["Validé", "Émis"])]
     df = pd.concat([a, b], ignore_index=True)

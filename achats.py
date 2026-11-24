@@ -36,6 +36,15 @@ def init_parametres(store):
         store.append("PARAMETRES", manquants)
     if not len(store.read("CONDITIONS_REGLEMENT")):
         store.append("CONDITIONS_REGLEMENT", [{"Condition": c} for c in CONDITIONS_DEFAUT])
+    # une fois : anciennes valeurs par défaut du sourcing (5 recherches, 30 jours) -> réglages économes (3, 60)
+    if "Migration sourcing économe" not in presents:
+        anciens = {"Sourcing : recherches web max par article": ("5", "3"),
+                   "Sourcing : validité des résultats (jours)": ("30", "60")}
+        val = dict(zip(pr["Paramètre"].map(as_text), pr["Valeur"].map(as_text)))
+        for k, (avant, apres) in anciens.items():
+            if val.get(k) == avant:
+                store.update("PARAMETRES", "Paramètre", k, {"Valeur": apres})
+        store.append("PARAMETRES", [{"Paramètre": "Migration sourcing économe", "Valeur": "faite"}])
 
 
 def params(ctx) -> dict:
@@ -162,9 +171,11 @@ def maj_lignes_da(ctx, ids_lignes: set[str]):
 def onglet_achats(ctx):
     import pilotage
     import sourcing
-    vues = {"📋 À faire": pilotage.vue_a_faire, "Demandes d'achat (DA)": _vue_da, "🔎 Sourcing": sourcing.vue_sourcing,
-            "Tableaux comparatifs (TCP)": _vue_tcp, "Bons de commande": _vue_bc}
-    if ctx.user["Rôle"] != "Acheteur":  # acheteur : DA, sourcing, TCP et BC
+    vues = {"📋 À faire": pilotage.vue_a_faire, "Demandes d'achat (DA)": _vue_da}
+    if ctx.user["Rôle"] == "Admin":  # sourcing (recherche web, le plus coûteux) : administrateurs uniquement
+        vues["🔎 Sourcing"] = sourcing.vue_sourcing
+    vues.update({"Tableaux comparatifs (TCP)": _vue_tcp, "Bons de commande": _vue_bc})
+    if ctx.user["Rôle"] != "Acheteur":  # acheteur : DA, TCP et BC
         vues.update({"Suivi livraisons": onglet_livraisons, "Fournisseurs": _vue_fournisseurs})
     vues["⭐ Notes fournisseurs"] = sourcing.vue_notes
     for i, (tab, fn) in enumerate(zip(st.tabs(list(vues)), vues.values())):
@@ -691,6 +702,36 @@ def _bc_suivant():
     st.session_state["bc-mode"] = "Nouveau BC"
 
 
+def _remise_globale(cle: str, brut: float, defaut: float = 0) -> float:
+    """Remise globale sur le total HT : en % ou en montant (le montant est converti en %)."""
+    c1, c2, c3 = st.columns([1, 1, 2])
+    pct = c1.number_input("Remise globale (%)", min_value=0.0, max_value=100.0, step=0.5, value=float(defaut or 0),
+                          key=f"{cle}-p", help="Remise commerciale sur le total HT (après les remises des lignes)")
+    mt = c2.number_input("ou montant (F)", min_value=0.0, step=1000.0, value=0.0, key=f"{cle}-m",
+                         help="Saisir le montant de la remise : il est converti en pourcentage du total HT")
+    if mt > 0 and brut > 0:
+        pct = round(min(mt, brut) / brut * 100, 4)
+    if pct > 0:
+        c3.caption(f"Remise globale : **{pct:g} %** soit **{fmt_montant(round(brut * pct / 100))} F** sur "
+                   f"{fmt_montant(brut)} F HT. La TVA est calculée sur le HT net.")
+    return pct
+
+
+def _afficher_totaux(tot: dict, ancien_ht: float | None = None):
+    rem = tot.get("Remise globale (F)", 0)
+    cols = st.columns(5 if rem else 3)
+    i = 0
+    if rem:
+        cols[0].metric("Total HT brut", f"{fmt_montant(tot['Total HT brut'])} F")
+        cols[1].metric(f"Remise globale ({tot['Remise globale %']:g} %)", f"- {fmt_montant(rem)} F")
+        i = 2
+    cols[i].metric("Total HT net" if rem else "Total HT", f"{fmt_montant(tot['Total HT'])} F",
+                   f"{fmt_montant(tot['Total HT'] - ancien_ht)} F" if ancien_ht is not None and tot["Total HT"] != ancien_ht
+                   else None, delta_color="inverse")
+    cols[i + 1].metric("TVA", f"{fmt_montant(tot['Montant TVA'])} F")
+    cols[i + 2].metric("Total TTC", f"{fmt_montant(tot['Total TTC'])} F")
+
+
 def _bc_ia(ctx, da, lignes: pd.DataFrame, k: str, fours: list[str], conds: list[str], taux: float) -> dict:
     """« ✨ Remplir le BC avec l'IA » : consigne écrite ou dictée et / ou proforma (photo, PDF).
     Les valeurs des lignes vont dans st.session_state[bc-ia-k] (id -> valeurs), l'en-tête dans bc-ia-k-ent."""
@@ -728,6 +769,11 @@ def _bc_ia(ctx, da, lignes: pd.DataFrame, k: str, fours: list[str], conds: list[
                             nouv["fournisseur"] = _four(doc["fournisseur"])
                         if as_text(doc.get("conditions")):
                             nouv["condition"] = as_text(doc["conditions"])
+                        if to_num(doc.get("remise_globale_pct")) > 0:
+                            nouv["remise_globale"] = to_num(doc["remise_globale_pct"])
+                        elif to_num(doc.get("remise_globale_montant")) > 0 and to_num(doc.get("total_ht")) > 0:
+                            brut = to_num(doc["total_ht"]) + to_num(doc["remise_globale_montant"])
+                            nouv["remise_globale"] = round(to_num(doc["remise_globale_montant"]) / brut * 100, 4)
                         nouv["observations"] = " ".join(x for x in (
                             f"Proforma n° {as_text(doc.get('numero'))}" if as_text(doc.get("numero")) else "",
                             f"du {fmt_date(doc.get('date'))}" if as_text(doc.get("date")) else "") if x)
@@ -744,6 +790,8 @@ def _bc_ia(ctx, da, lignes: pd.DataFrame, k: str, fours: list[str], conds: list[
                                     if l.get(c) is not None}}
                         if as_text(r.get("fournisseur")):
                             nouv["fournisseur"] = _four(r["fournisseur"])
+                        if r.get("remise_globale_pct") is not None:
+                            nouv["remise_globale"] = to_num(r["remise_globale_pct"])
                         for c_, ch in (("condition", "condition_reglement"), ("magasin", "magasin"),
                                        ("observations", "observations")):
                             if as_text(r.get(ch)):
@@ -926,11 +974,9 @@ def _vue_bc(ctx):
     sel = ed.loc[ed["Inclure"].astype(bool) & (ed["Quantité"].map(to_num) > 0)].to_dict("records")
     tout = sel + st.session_state[extra_key]
     _controle_bc(ctx, tout)
-    tot = totaux(tout, taux)
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total HT", f"{fmt_montant(tot['Total HT'])} F")
-    m2.metric("TVA", f"{fmt_montant(tot['Montant TVA'])} F")
-    m3.metric("Total TTC", f"{fmt_montant(tot['Total TTC'])} F")
+    rg = _remise_globale(f"bc-rg-{k}-{ev}", totaux(tout, taux)["Total HT brut"], to_num(ent.get("remise_globale")))
+    tot = totaux(tout, taux, remise_globale=rg)
+    _afficher_totaux(tot)
     depasse = [x for x in sel if to_num(x["Quantité"]) > to_num(x["Reste DA"]) + 1e-9]
     ok_dep = True
     if depasse:
@@ -1027,6 +1073,9 @@ def _enregistre_bc(ctx, e: dict, lignes: list[dict]):
               "Chantier": as_text(da["Chantier"]), "Code Parc": e["parc"], "Magasin": e["magasin"],
               "Fournisseur": e["four"], "Condition règlement": e["cond"], "Total HT": e["tot"]["Total HT"],
               "Taux TVA": e["taux"], "Montant TVA": e["tot"]["Montant TVA"], "Total TTC": e["tot"]["Total TTC"],
+              "Total HT brut": e["tot"].get("Total HT brut", e["tot"]["Total HT"]),
+              "Remise globale %": e["tot"].get("Remise globale %", 0),
+              "Remise globale (F)": e["tot"].get("Remise globale (F)", 0),
               "Statut": "Émis", "Acheteur": ctx.user["Nom"], "Validé par": "", "Date validation": "",
               "Motif rejet": "", "ID_TCP": e["id_tcp"], "N° TCP": as_text((e["tcp"] or {}).get("N° TCP")),
               "Observations": e["obs"], "Créé le": maintenant()}
@@ -1214,12 +1263,10 @@ def modifier_bc(ctx, b: dict, l: pd.DataFrame):
         gardees = ed.loc[ed["Quantité"].map(to_num) > 0].to_dict("records")
         _controle_bc(ctx, gardees)
         taux = to_num(p.get("Taux TVA (%)"))
-        tot = totaux(gardees, taux)
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total HT", f"{fmt_montant(tot['Total HT'])} F", f"{fmt_montant(tot['Total HT'] - to_num(b['Total HT']))} F"
-                  if tot["Total HT"] != to_num(b["Total HT"]) else None, delta_color="inverse")
-        m2.metric("TVA", f"{fmt_montant(tot['Montant TVA'])} F")
-        m3.metric("Total TTC", f"{fmt_montant(tot['Total TTC'])} F")
+        rg = _remise_globale(f"mbc-rg-{id_bc}", totaux(gardees, taux)["Total HT brut"],
+                             to_num(b.get("Remise globale %")))
+        tot = totaux(gardees, taux, remise_globale=rg)
+        _afficher_totaux(tot, to_num(b["Total HT"]))
         depasse = [x["Désignation"] for x in gardees
                    if x["Max DA"] is not None and x["Max DA"] == x["Max DA"] and to_num(x["Quantité"]) > to_num(x["Max DA"]) + 1e-9]
         ok_dep = True
@@ -1278,6 +1325,8 @@ def modifier_bc(ctx, b: dict, l: pd.DataFrame):
                 "Code Parc": ", ".join(dict.fromkeys(as_text(x["Code parc"]).upper() for x in gardees
                                                      if as_text(x["Code parc"]))),
                 "Total HT": tot["Total HT"], "Montant TVA": tot["Montant TVA"], "Total TTC": tot["Total TTC"],
+                "Total HT brut": tot["Total HT brut"], "Remise globale %": tot["Remise globale %"],
+                "Remise globale (F)": tot["Remise globale (F)"],
                 "Taux TVA": _taux_entete(gardees, taux), "Modifié le": maintenant(), "Modifié par": ctx.user.get("Nom", ""),
                 **({} if valide else {"Statut": "Émis", "Motif rejet": "", "Validé par": "", "Date validation": ""})})
             maj_lignes_da(ctx, {as_text(i) for i in v["ID_Ligne_DA"] if as_text(i)})

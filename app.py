@@ -1763,6 +1763,7 @@ def bloquer_traduction():
 
 
 def main():
+    ia.brancher_conso(get_store)  # compteur de consommation de l'API Claude (table CONSO_IA)
     bloquer_traduction()
     restaurer_session()
     if (st.session_state.get("user") or {}).get("Rôle") in LARGE and _u.get("Rôle") not in LARGE:
