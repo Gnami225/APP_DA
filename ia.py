@@ -518,8 +518,21 @@ def recherche_web(system: str, consigne: str, outil: dict, max_recherches: int =
                   max_tokens: int = 12000) -> tuple[dict, list[str], int]:
     """Recherche web côté Anthropic puis réponse structurée via `outil`.
     Renvoie (résultat, URLs réellement consultées, nombre de recherches)."""
-    tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": int(max_recherches),
-              "user_location": LIEU_PWC}, outil]
+    derniere = None
+    for version in ("web_search_20250305", "web_search_20260318", "web_search_20260209"):
+        outil_web = {"type": version, "name": "web_search", "max_uses": int(max_recherches), "user_location": LIEU_PWC}
+        if version != "web_search_20250305":
+            outil_web["allowed_callers"] = ["direct"]  # recherche appelée directement (pas via exécution de code)
+        try:
+            return _recherche(system, consigne, outil, [outil_web, outil], max_tokens)
+        except IAErreur as e:  # version d'outil refusée par le modèle : on essaie la suivante
+            derniere = e
+            if "(400)" not in str(e):
+                raise
+    raise derniere
+
+
+def _recherche(system, consigne, outil, tools, max_tokens):
     msgs = [{"role": "user", "content": consigne}]
     urls, nb = [], 0
     for _ in range(4):  # « pause_turn » : l'API rend la main pendant une longue recherche, on relance
