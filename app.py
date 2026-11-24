@@ -565,6 +565,21 @@ def choisir_article(prefix: str, version: int = 0):
     return des, ref, code, col_def, [f"{prefix}-des", cle_ref]
 
 
+def _colisage_doc(unite_doc, defaut) -> str:
+    """Unité écrite sur le document (paquets, rouleaux, m²…) -> colisage de la liste, sinon celui proposé."""
+    u = as_text(unite_doc).lower().replace("²", "2").replace("³", "3").strip().rstrip("s").rstrip("x")
+    if not u:
+        return as_text(defaut) or "Unité"
+    norm = {c: c.lower().replace("²", "2").replace("³", "3") for c in COLISAGES}
+    for c, cc in norm.items():
+        if u == cc:
+            return c
+    for c, cc in norm.items():  # « paquet » / « pq », « rouleau », « unite »…
+        if len(cc) >= 3 and (u.startswith(cc[:4]) or cc.startswith(u)):
+            return c
+    return as_text(defaut) or "Unité"
+
+
 def _raz_ia_da():
     for k in ("ia-da-lignes", "ia-da-err", "ia-da-doc"):
         st.session_state.pop(k, None)
@@ -650,12 +665,18 @@ def da_par_ia(parcs: list[str]):
         t.insert(0, "Inclure", True)
         if fidele:
             t["Catalogue"] = False
-            t["Désignation doc"] = t["Texte"]
-            t["Référence doc"] = ""
-            cols = ["Inclure", "Désignation doc", "Référence doc", "Colisage", "Quantité", "Code_Parc", "Usage",
-                    "Catalogue", "Proposition catalogue"]
-            st.caption("Libellés repris tels quels du document (aucune confusion possible). Cochez « Catalogue » pour "
-                       "remplacer une ligne par l'article proposé ; sinon elle partira au catalogage.")
+            for c in ("Désignation doc", "Référence doc", "Unité doc"):
+                if c not in t:
+                    t[c] = ""
+            # nature propre (DISJONCTEUR) + reste du libellé mot pour mot (20 Ampères LE Grand) ; à défaut, le texte
+            t["Référence doc"] = [as_text(r) if as_text(d) else "" for d, r in zip(t["Désignation doc"], t["Référence doc"])]
+            t["Désignation doc"] = [as_text(d) or as_text(x) for d, x in zip(t["Désignation doc"], t["Texte"])]
+            t["Colisage"] = [_colisage_doc(u, c) for u, c in zip(t["Unité doc"], t["Colisage"])]
+            cols = ["Inclure", "Texte", "Désignation doc", "Référence doc", "Colisage", "Quantité", "Code_Parc",
+                    "Usage", "Catalogue", "Proposition catalogue"]
+            st.caption("Fidèle au document : la désignation donne la nature de l'article, la référence reprend le reste "
+                       "du libellé mot pour mot (colonne « Sur le document » pour comparer). Corrigez si besoin. Cochez "
+                       "« Catalogue » pour utiliser plutôt l'article proposé ; sinon la ligne partira au catalogage.")
         else:
             cols = ["Inclure", "Texte", "Statut", "Désignation", "Référence", "Colisage", "Quantité", "Code_Parc",
                     "Usage", "À vérifier"]
@@ -666,8 +687,8 @@ def da_par_ia(parcs: list[str]):
                             column_config={
                                 "Inclure": st.column_config.CheckboxColumn("✓", width="small"),
                                 "Texte": st.column_config.TextColumn("Sur le document", width="medium"),
-                                "Désignation doc": st.column_config.TextColumn("Désignation (document)", width="large"),
-                                "Référence doc": st.column_config.TextColumn("Référence"),
+                                "Désignation doc": st.column_config.TextColumn("Désignation", width="medium"),
+                                "Référence doc": st.column_config.TextColumn("Référence", width="medium"),
                                 "Catalogue": st.column_config.CheckboxColumn("Catalogue", width="small"),
                                 "Colisage": st.column_config.SelectboxColumn("Colisage", options=COLISAGES),
                                 "Quantité": st.column_config.NumberColumn("Quantité", min_value=0.0, format="%g"),
