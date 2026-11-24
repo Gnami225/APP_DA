@@ -262,8 +262,8 @@ _OUTIL_EXTRAIRE = {
             "designation": {"type": "string", "description": "type d'article, ex. PNEU, FILTRE A GASOIL, CIMENT"},
             "designation_doc": {"type": "string", "description": (
                 "NATURE de l'article telle que sur le document, propre : en MAJUSCULES, au singulier, abréviation "
-                "de type développée (DPN → DISJONCTEUR ; « Prises » → PRISE ; « Paquets de dominos » → DOMINO), "
-                "avec le qualificatif qui change l'article (DISJONCTEUR DIFFERENTIEL, PRISE ETANCHE, GLOBE DE "
+                "de type développée (DPN → DISJONCTEUR PHASE-NEUTRE ; « Prises » → PRISE ; « Paquets de dominos » → "
+                "DOMINO), avec le qualificatif qui change l'article (INTERRUPTEUR DIFFERENTIEL, PRISE ETANCHE, GLOBE DE "
                 "DOUCHE, SPOT ENCASTRE). Sans calibre, dimension, marque ni quantité.")},
             "reference_doc": {"type": "string", "description": (
                 "le RESTE du libellé du document, recopié tel qu'écrit (mêmes mots, même orthographe) : calibre, "
@@ -329,16 +329,21 @@ _OUTIL_DECOUPER = {
             "index": {"type": "integer"},
             "designation": {"type": "string", "description": "NATURE de l'article, MAJUSCULES, singulier, sans "
                                                              "accent, abréviation de type développée (DPN → "
-                                                             "DISJONCTEUR), qualificatif qui change l'article inclus "
-                                                             "(DISJONCTEUR DIFFERENTIEL, PRISE ETANCHE, GLOBE DE DOUCHE)"},
+                                                             "DISJONCTEUR PHASE-NEUTRE), qualificatif qui change "
+                                                             "l'article inclus (INTERRUPTEUR DIFFERENTIEL, PRISE "
+                                                             "ETANCHE, GLOBE DE DOUCHE)"},
             "reference": {"type": "string", "description": "le RESTE du libellé, mot pour mot (calibre, dimension, "
                                                            "puissance, marque, variante), sans « de » initial"},
             "unite": {"type": "string", "description": "unité si le libellé l'indique (paquet, rouleau…), sinon vide"}},
         "required": ["index", "designation", "reference"]}}}, "required": ["lignes"]}}
 
-EXEMPLES_DECOUPAGE = """Exemples :
-« DPN de 20 Ampères LE Grand » → DISJONCTEUR | 20 Ampères LE Grand
-« DPN inter différentiel de 63 Ampères LE Grand monophasé » → DISJONCTEUR DIFFERENTIEL | 63 Ampères LE Grand monophasé
+EXEMPLES_DECOUPAGE = """Règles électricité : DPN = disjoncteur phase + neutre → DISJONCTEUR PHASE-NEUTRE ;
+« inter différentiel » / « interrupteur différentiel » → INTERRUPTEUR DIFFERENTIEL (ce n'est PAS un disjoncteur) ;
+« disjoncteur différentiel » → DISJONCTEUR DIFFERENTIEL ; ne jamais confondre ces trois articles.
+Exemples :
+« DPN de 20 Ampères LE Grand » → DISJONCTEUR PHASE-NEUTRE | 20 Ampères LE Grand
+« DPN inter différentiel de 63 Ampères LE Grand monophasé » → INTERRUPTEUR DIFFERENTIEL | 63 Ampères LE Grand monophasé (DPN)
+« Disjoncteur différentiel 40A 30mA » → DISJONCTEUR DIFFERENTIEL | 40A 30mA
 « Prises étanches encastrées » → PRISE ETANCHE | encastrées
 « Contacts simples V/V » → INTERRUPTEUR SIMPLE VA-ET-VIENT | V/V
 « Globes Led de 18 W » → GLOBE | Led 18 W
