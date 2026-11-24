@@ -566,7 +566,7 @@ def choisir_article(prefix: str, version: int = 0):
 
 
 def _raz_ia_da():
-    for k in ("ia-da-lignes", "ia-da-err"):
+    for k in ("ia-da-lignes", "ia-da-err", "ia-da-doc"):
         st.session_state.pop(k, None)
     st.session_state["ia-da-v"] = st.session_state.get("ia-da-v", 0) + 1
 
@@ -590,6 +590,7 @@ def da_par_ia(parcs: list[str]):
                     try:
                         st.session_state["ia-da-lignes"] = ia.analyser_besoin(
                             txt, load("ARTICLES"), load("PARC"), COLISAGES, version_donnees())
+                        st.session_state["ia-da-doc"] = False
                         if not st.session_state["ia-da-lignes"]:
                             st.warning("Aucun article reconnu : précisez la demande.")
                     except ia.IAErreur as e:
@@ -609,6 +610,7 @@ def da_par_ia(parcs: list[str]):
                         lignes, ent = ia.analyser_document_da(f.name, f.getvalue(), load("ARTICLES"), load("PARC"),
                                                               COLISAGES, version_donnees(), consigne.strip())
                         st.session_state["ia-da-lignes"] = lignes
+                        st.session_state["ia-da-doc"] = True
                         pend = {}
                         if as_text(ent.get("priorite")) in PRIORITES:
                             pend["da-prio"] = ent["priorite"]
@@ -634,15 +636,39 @@ def da_par_ia(parcs: list[str]):
             return
         cat, refs_de = _catalogue(version_donnees())
         t = pd.DataFrame(props)
+        for c in ("Texte", "Code Article"):
+            if c not in t:
+                t[c] = ""
+        t["Texte"] = [as_text(x) or " ".join(y for y in (as_text(d), as_text(r)) if y)
+                      for x, d, r in zip(t["Texte"], t["Désignation"], t["Référence"])]
+        fidele = st.toggle("📄 Reprendre exactement les libellés du document", key=f"ia-da-fid-{v}",
+                           value=bool(st.session_state.get("ia-da-doc")),
+                           help="Activé : chaque ligne garde le libellé tel qu'il est écrit sur le devis / la liste. "
+                                "Cochez « Catalogue » sur une ligne pour utiliser plutôt l'article du catalogue proposé.")
+        t["Proposition catalogue"] = [f"{as_text(d)} · {as_text(r)} ({as_text(c)})" if as_text(c) else "— aucun —"
+                                      for d, r, c in zip(t["Désignation"], t["Référence"], t["Code Article"])]
         t.insert(0, "Inclure", True)
-        cols = ["Inclure", "Statut", "Désignation", "Référence", "Colisage", "Quantité", "Code_Parc", "Usage",
-                "À vérifier"]
-        st.caption("Vérifiez et corrigez si besoin (désignation, référence, quantité, usage) puis ajoutez à la DA. "
-                   "🆕 = article absent du catalogue : il partira au catalogage.")
-        ed = st.data_editor(t[cols], hide_index=True, width="stretch", key=f"ia-da-ed-{v}",
-                            disabled=["Statut", "À vérifier"],
+        if fidele:
+            t["Catalogue"] = False
+            t["Désignation doc"] = t["Texte"]
+            t["Référence doc"] = ""
+            cols = ["Inclure", "Désignation doc", "Référence doc", "Colisage", "Quantité", "Code_Parc", "Usage",
+                    "Catalogue", "Proposition catalogue"]
+            st.caption("Libellés repris tels quels du document (aucune confusion possible). Cochez « Catalogue » pour "
+                       "remplacer une ligne par l'article proposé ; sinon elle partira au catalogage.")
+        else:
+            cols = ["Inclure", "Texte", "Statut", "Désignation", "Référence", "Colisage", "Quantité", "Code_Parc",
+                    "Usage", "À vérifier"]
+            st.caption("Articles rattachés au catalogue ; la colonne « Sur le document » montre le libellé d'origine. "
+                       "🆕 = article absent du catalogue : il partira au catalogage.")
+        ed = st.data_editor(t[cols], hide_index=True, width="stretch", key=f"ia-da-ed-{v}-{int(fidele)}",
+                            disabled=["Statut", "À vérifier", "Texte", "Proposition catalogue"],
                             column_config={
                                 "Inclure": st.column_config.CheckboxColumn("✓", width="small"),
+                                "Texte": st.column_config.TextColumn("Sur le document", width="medium"),
+                                "Désignation doc": st.column_config.TextColumn("Désignation (document)", width="large"),
+                                "Référence doc": st.column_config.TextColumn("Référence"),
+                                "Catalogue": st.column_config.CheckboxColumn("Catalogue", width="small"),
                                 "Colisage": st.column_config.SelectboxColumn("Colisage", options=COLISAGES),
                                 "Quantité": st.column_config.NumberColumn("Quantité", min_value=0.0, format="%g"),
                                 "Code_Parc": st.column_config.TextColumn("Code parc"),
@@ -655,10 +681,17 @@ def da_par_ia(parcs: list[str]):
             if len(manque):
                 st.error("Quantité et usage obligatoires pour chaque article coché.")
                 return
-            for _, l in garder.iterrows():
-                des = " ".join(as_text(l["Désignation"]).upper().split())
-                ref = " ".join(as_text(l["Référence"]).upper().split())
-                code = refs_de.get(des, {}).get(ref, "")  # recalcul : l'utilisateur a pu corriger
+            for i, l in garder.iterrows():
+                if fidele and not l["Catalogue"]:  # libellé exact du document
+                    des = " ".join(as_text(l["Désignation doc"]).split())
+                    ref = " ".join(as_text(l["Référence doc"]).split())
+                    code = refs_de.get(des.upper(), {}).get(ref.upper(), "")
+                    if code:
+                        des, ref = des.upper(), ref.upper()
+                else:
+                    des = " ".join(as_text(t.at[i, "Désignation"] if fidele else l["Désignation"]).upper().split())
+                    ref = " ".join(as_text(t.at[i, "Référence"] if fidele else l["Référence"]).upper().split())
+                    code = refs_de.get(des, {}).get(ref, "")  # recalcul : l'utilisateur a pu corriger
                 st.session_state.lignes.append({
                     "Code Article": code, "Désignation": des, "Référence": ref,
                     "Code_Parc": as_text(l["Code_Parc"]).upper(), "Colisage": as_text(l["Colisage"]) or "Unité",
