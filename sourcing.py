@@ -298,9 +298,11 @@ def _preparer_tcp(ctx, id_da: str, noms: list[str], nouveaux: list[dict]):
     ctx.refresh()
     st.session_state["tcp-mode"] = "Nouveau TCP"
     st.session_state["tcp-da"] = id_da
-    st.session_state["tcp-nf"] = min(len(noms), 12)
-    for j, n in enumerate(noms[:12]):
-        st.session_state[f"tcp-f{j}-{id_da}"] = n
+    import tcp_ia
+    S = tcp_ia._etat(id_da)
+    for n in noms[:12]:
+        tcp_ia._ajouter(S, n)
+    tcp_ia._bump(S)
     st.session_state.src_msg = ("TCP prêt : ouvrez l'onglet « Tableaux comparatifs (TCP) » — la DA et les "
                                 "fournisseurs sont déjà renseignés.")
     st.session_state.src_tcp_pret = True
