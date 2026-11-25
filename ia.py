@@ -139,11 +139,13 @@ FONCTIONS = {
     "verifier_doublons_fournisseurs": "Doublons fournisseurs", "cataloguer_auto": "Catalogage automatique",
     "proposer_catalogage": "Catalogage (propositions)", "ui": "Assistant d'analyse", "commentaire": "Commentaire de période",
     "_tour": "DA en conversation", "_aide": "Aide (questions)", "da_par_ia": "DA par l'IA (texte / document)",
-    "_bc_ia": "BC par l'IA", "_lecture_tcp": "Lecture devis (TCP)", "ui_lecture": "Lecture de document",
+    "_bc_ia": "BC par l'IA", "ui_lecture": "Lecture de document",
     "_traiter": "Réception BL (lecture)", "onglet_bl": "Réception BL (lecture)", "_sorties": "Magasin : sortie dictée",
     "_inventaire": "Magasin : inventaire dicté", "_relance": "Relance fournisseur", "_cb": "Reformulation motif",
     "vue_sourcing": "Cotations (sourcing)", "_table_decisions": "Catalogage (propositions)",
-    "_catalogage_auto": "Catalogage automatique"}
+    "_catalogage_auto": "Catalogage automatique", "lire_devis": "TCP : lecture des devis",
+    "modifier_offres": "TCP : saisie en langage naturel", "recommander_tcp": "TCP : recommandation",
+    "motif_tcp": "TCP : rédaction du motif"}
 _JOURNAL = {"lignes": [], "depuis": None, "store": None}
 
 
@@ -588,6 +590,111 @@ def ui_lecture(cle: str, attendues: list[dict], quoi: str = "le devis ou la prof
                 st.session_state[f"{cle}-v"] = st.session_state.get(f"{cle}-v", 0) + 1
                 st.rerun()
     return st.session_state.get(cle)
+
+
+# =========================================================================== 2 bis. TCP intelligent
+_OUTIL_DEVIS = {
+    "name": "lire_devis",
+    "description": "Offre d'un fournisseur lue sur son devis / sa proforma, rapprochée des articles demandés.",
+    "input_schema": {"type": "object", "properties": {
+        "fournisseur": {"type": "string", "description": "raison sociale de l'émetteur du devis (pas PWC)"},
+        "numero": {"type": "string"}, "date": {"type": "string", "description": "AAAA-MM-JJ"},
+        "validite": {"type": "string", "description": "date limite de validité AAAA-MM-JJ, ou durée telle qu'écrite"},
+        "delai_texte": {"type": "string", "description": "délai de livraison tel qu'écrit"},
+        "delai_jours": {"type": "number", "description": "délai converti en jours (disponible / immédiat = 0)"},
+        "conditions": {"type": "string", "description": "conditions de paiement telles qu'écrites"},
+        "credit_jours": {"type": "number", "description": "jours de crédit accordés (comptant / à la commande = 0)"},
+        "remise_globale_pct": {"type": "number", "description": "remise sur le total, en % (calculée si en F)"},
+        "transport": {"type": "number", "description": "frais de transport / livraison facturés en F HT"},
+        "lignes": {"type": "array", "items": {"type": "object", "properties": {
+            "id_attendu": {"type": ["string", "null"], "description": "id de l'article demandé correspondant, null si "
+                                                                     "la ligne n'a rien à voir avec la demande"},
+            "libelle": {"type": "string", "description": "libellé exact du devis"},
+            "marque": {"type": "string", "description": "marque / fabricant / origine si indiqué"},
+            "quantite": {"type": "number"}, "unite": {"type": "string"},
+            "prix_unitaire_ht": {"type": "number", "description": "prix unitaire HT avant remise de ligne"},
+            "remise_pct": {"type": "number"},
+            "conformite": {"type": "string", "enum": ["Conforme", "Équivalent", "Non conforme", "À vérifier"],
+                           "description": "Conforme = même article et mêmes caractéristiques ; Équivalent = autre "
+                                          "marque / variante acceptable ; Non conforme = caractéristique différente "
+                                          "(calibre, dimension, norme…) ; À vérifier = doute"},
+            "qualite": {"type": "string", "enum": ["Haute", "Standard", "Entrée de gamme", "Inconnue"],
+                        "description": "gamme de qualité d'après la marque / l'origine connue, Inconnue si rien"},
+            "remarque": {"type": "string", "description": "écart de quantité / d'unité, caractéristique différente…"}},
+            "required": ["id_attendu", "libelle", "conformite"]}},
+        "remarques": {"type": "string", "description": "illisible, douteux, devis expiré, TVA…"}},
+        "required": ["fournisseur", "lignes"]}}
+
+
+def lire_devis(nom: str, contenu: bytes, attendues: list[dict]) -> dict:
+    """Une seule lecture par devis : en-tête de l'offre + lignes rapprochées des articles de la DA + conformité."""
+    return structure(CONTEXTE_PWC + " Tu lis le devis d'un fournisseur pour un tableau comparatif. Recopie fidèlement "
+                     "les prix (F CFA, n'invente rien, laisse vide ce qui est illisible). Associe chaque ligne du devis "
+                     "à l'article demandé qui désigne le même besoin, et juge la conformité avec la demande "
+                     "(caractéristiques, calibre, dimension, référence). Une ligne non demandée : id_attendu null.",
+                     [bloc_fichier(nom, contenu),
+                      {"type": "text", "text": "Articles demandés : " + json.dumps(attendues, ensure_ascii=False)}],
+                     _OUTIL_DEVIS)
+
+
+_OUTIL_MODIF = {
+    "name": "modifier_offres",
+    "description": "Modifications à appliquer au tableau comparatif d'après la phrase de l'acheteur.",
+    "input_schema": {"type": "object", "properties": {
+        "operations": {"type": "array", "items": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": [
+                "ajouter_fournisseur", "retirer_fournisseur", "prix", "retirer_prix", "remise_globale",
+                "delai", "conditions", "transport", "observation", "conformite", "qualite", "marque", "choisir",
+                "situation"]},
+            "fournisseur": {"type": "string", "description": "nom exact d'un fournisseur du tableau (ou nouveau)"},
+            "article_id": {"type": "string", "description": "id de l'article concerné ; vide = tous ses articles"},
+            "nombre": {"type": "number", "description": "prix unitaire HT, % de remise, jours de délai / crédit, F de "
+                                                       "transport"},
+            "texte": {"type": "string", "description": "valeur texte : délai ou conditions tels que dits, "
+                                                      "Conforme / Équivalent / Non conforme / À vérifier, "
+                                                      "Haute / Standard / Entrée de gamme, marque, fait de terrain"}},
+            "required": ["action"]}},
+        "reponse": {"type": "string", "description": "une phrase qui dit ce qui a été changé (ou ce qui manque)"}},
+        "required": ["operations", "reponse"]}}
+
+
+def modifier_offres(phrase: str, etat: dict) -> dict:
+    return structure(CONTEXTE_PWC + " Tu tiens le tableau comparatif d'offres (TCP) de l'acheteur. Traduis sa phrase en "
+                     "opérations. « 5 % de remise en plus » = remise_globale (nombre = remise totale obtenue). Un prix "
+                     "donné pour un article = prix. « Ne fait pas X » = retirer_prix. « Prends Y pour X » = choisir. "
+                     "Un fait de terrain (urgence, arrêt de chantier, fournisseur en retard, trésorerie…) = situation. "
+                     "N'invente aucun chiffre.",
+                     json.dumps({"tableau": etat, "phrase": phrase}, ensure_ascii=False), _OUTIL_MODIF, rapide=True)
+
+
+_OUTIL_RECO = {
+    "name": "recommander",
+    "description": "Fournisseur recommandé pour chaque article du tableau comparatif.",
+    "input_schema": {"type": "object", "properties": {
+        "articles": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "string"}, "fournisseur": {"type": "string", "description": "nom exact, vide si aucun"},
+            "raison": {"type": "string", "description": "une phrase courte et chiffrée (prix, délai, conformité…)"}},
+            "required": ["id", "fournisseur", "raison"]}},
+        "synthese": {"type": "string", "description": "3 phrases max : répartition conseillée, coût vs moins-disant, "
+                                                      "points d'attention"},
+        "alertes": {"type": "array", "items": {"type": "string"}}},
+        "required": ["articles", "synthese"]}}
+
+
+def recommander_tcp(donnees: dict) -> dict:
+    return structure(CONTEXTE_PWC + " Tu es acheteur senior. Recommande pour chaque article le fournisseur à retenir. "
+                     "Pars du score calculé (critères pondérés selon le profil choisi) mais tiens compte de la situation "
+                     "terrain décrite, de l'urgence de la DA, de la conformité (n'écarte une offre non conforme que si "
+                     "une offre conforme existe), de la qualité, du délai, de la fiabilité du fournisseur et de l'intérêt "
+                     "de regrouper les commandes. Ne choisis qu'un fournisseur qui a chiffré l'article. Sois factuel.",
+                     json.dumps(donnees, ensure_ascii=False, default=str), _OUTIL_RECO)
+
+
+def motif_tcp(donnees: dict) -> str:
+    return texte(CONTEXTE_PWC + " Rédige le motif des choix d'un tableau comparatif d'offres, pour l'audit : 2 à 4 "
+                 "phrases professionnelles, factuelles et chiffrées, qui expliquent pourquoi certains articles ne sont "
+                 "pas attribués au moins-disant (délai, conformité, qualité, urgence chantier, fiabilité…). Réponds avec "
+                 "le motif seul.", json.dumps(donnees, ensure_ascii=False, default=str), rapide=True, max_tokens=600)
 
 
 # =========================================================================== 3. catalogage

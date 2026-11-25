@@ -43,7 +43,7 @@ TABLES = {
     # documents fournisseurs importés (BL, devis, factures) : le fichier est dans Google Drive, ici sa fiche
     "DOCUMENTS": ["ID_Document", "Type", "N° document", "Date document", "Fournisseur", "ID_BC", "N° BC", "ID_DA",
                   "N° DA", "Chantier", "Nom fichier", "Lien", "ID Drive", "Empreinte", "Lu par IA", "Écarts",
-                  "Saisi par", "Créé le"],
+                  "Saisi par", "Créé le", "ID_TCP", "N° TCP"],
     # stock : chaque entrée / sortie / transfert / inventaire ; le stock = somme des mouvements par magasin
     "STOCK_MOUVEMENTS": ["ID_Mouvement", "Date", "Magasin", "Type", "Code Article", "Désignation", "Référence",
                          "Unité", "Quantité", "Code_Parc", "Bénéficiaire", "Motif", "ID_BC", "N° BC", "N° BL",
@@ -68,10 +68,12 @@ TABLES = {
                         "Source"],
     "TCP": ["ID_TCP", "N° TCP", "Date TCP", "ID_DA", "N° DA", "Chantier", "Fournisseurs consultés",
             "Fournisseur retenu", "Montant retenu HT", "Moins-disant", "Montant moins-disant HT",
-            "Motif choix", "Conditions offres", "Acheteur", "Statut", "N° BC", "Observations", "Créé le"],
+            "Motif choix", "Conditions offres", "Acheteur", "Statut", "N° BC", "Observations", "Créé le",
+            "Profil", "Situation terrain", "Recommandation IA", "Recommandation suivie"],
     "TCP_OFFRES": ["ID_Offre", "ID_TCP", "N° TCP", "N° Ligne", "ID_Ligne_DA", "Code Article", "Désignation",
                    "Référence", "Unité", "Quantité", "Fournisseur", "Prix unitaire HT", "Montant HT",
-                   "Retenu", "Date TCP", "N° DA", "Chantier"],
+                   "Retenu", "Date TCP", "N° DA", "Chantier", "Marque", "Conformité", "Qualité",
+                   "Libellé devis", "Recommandé"],
 }
 
 PRIORITES = ["Normale", "Urgente", "Critique"]

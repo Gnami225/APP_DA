@@ -497,6 +497,12 @@ def build_tcp_pdf(tcp: dict, fournisseurs: list[dict], lignes: list[dict], param
     story += [Spacer(1, 3 * mm), Paragraph(synth, _s["bc_l"])]
     if motif:
         story.append(Paragraph(f"<b>Motif des choix :</b> {_p(motif).text}", _s["bc_l"]))
+    if as_text(tcp.get("Recommandation suivie")):
+        reco = (f"<b>Aide à la décision :</b> profil « {_p(as_text(tcp.get('Profil'))).text} » — recommandation "
+                f"suivie sur {_p(as_text(tcp.get('Recommandation suivie'))).text} article(s)")
+        if as_text(tcp.get("Situation terrain")):
+            reco += f" ; situation terrain : {_p(as_text(tcp.get('Situation terrain'))).text}"
+        story.append(Paragraph(reco, _s["bc_l"]))
     story.append(Paragraph("Cadre épais : prix le plus bas de l'article. Colonne RETENU : fournisseur choisi "
                            "pour l'article (un bon de commande par fournisseur retenu).", _s["small"]))
     visas = Table([[_p("ÉTABLI PAR (ACHATS)", "th"), _p("CONTRÔLE", "th"), _p("VALIDATION (DIRECTION)", "th")],

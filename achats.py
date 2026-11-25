@@ -243,25 +243,6 @@ def _attendues(lignes: pd.DataFrame, col_id: str, col_q: str, col_u: str) -> lis
                                                            lignes[col_q], lignes[col_u])]
 
 
-def _lecture_tcp(da, lignes: pd.DataFrame, noms: list[str]) -> tuple[list[dict], str]:
-    """Lecture IA des devis : un document par fournisseur -> prix unitaires nets (remise déduite)."""
-    lus = [{} for _ in noms]
-    if ia.disponible():
-        j = st.selectbox("📷 Devis à lire avec l'IA — fournisseur", range(len(noms)), format_func=lambda x: noms[x],
-                         key=f"tcp-ia-four-{da['_id']}")
-        ia.ui_lecture(f"tcp-ia-{da['_id']}-{noms[j]}", _attendues(lignes, "_id", "Reste à commander", "Colisage"),
-                      f"le devis de {noms[j]}")
-    vers = []
-    for j, n in enumerate(noms):
-        cle = f"tcp-ia-{da['_id']}-{n}"
-        for i, l in (st.session_state.get(cle) or {}).items():
-            pu = to_num(l.get("prix_unitaire_ht"))
-            if pu:
-                lus[j][i] = round(pu * (1 - (to_num(l.get("remise_pct")) or 0) / 100), 2)
-        vers.append(str(st.session_state.get(f"{cle}-v", 0)))
-    return lus, ".".join(vers)
-
-
 def _relance(ctx, b, g: pd.DataFrame):
     """Email de relance fournisseur rédigé par l'IA pour le reste à livrer."""
     reste = g.loc[g["Reste"] > 1e-9]
@@ -311,125 +292,8 @@ def _vue_tcp(ctx):
         return
     sl = suivi_lignes(ctx)
     lignes = sl.loc[(sl["ID_DA"].map(as_text) == da["_id"]) & (sl["Reste à commander"] > 0)].sort_values("N° Ligne")
-    if "tcp-nf" not in st.session_state:
-        st.session_state["tcp-nf"] = 3
-    nf = int(st.number_input("Nombre de fournisseurs consultés", min_value=1, max_value=12, step=1, key="tcp-nf"))
-    conds, fours = conditions(ctx), fournisseurs(ctx)
-    offres = []
-    par_ligne = min(nf, 4)
-    for debut in range(0, nf, par_ligne):
-        cols = st.columns(par_ligne)
-        for j in range(debut, min(debut + par_ligne, nf)):
-            with cols[j - debut]:
-                st.markdown(f"**Fournisseur {j + 1}**")
-                nom = st.selectbox("Nom", fours, index=None, accept_new_options=True, key=f"tcp-f{j}-{da['_id']}",
-                                   placeholder="Choisir ou saisir")
-                delai = st.text_input("Délai de livraison", key=f"tcp-d{j}-{da['_id']}")
-                cond = st.selectbox("Conditions de règlement", conds, index=None, accept_new_options=True,
-                                    key=f"tcp-c{j}-{da['_id']}", placeholder="Choisir ou saisir")
-                obs = st.text_input("Observation", key=f"tcp-o{j}-{da['_id']}")
-                offres.append({"Nom": as_text(nom).upper(), "Délai": delai.strip(), "Condition": as_text(cond),
-                               "Observation": obs.strip()})
-    noms = [o["Nom"] for o in offres]
-    if any(not n for n in noms):
-        st.caption("Renseignez le nom de chaque fournisseur pour saisir les prix.")
-        return
-    if len(set(noms)) < len(noms):
-        st.error("Un même fournisseur est saisi deux fois.")
-        return
-
-    # ---- 1) prix proposés, article par article
-    st.markdown("##### 1. Prix unitaires HT proposés (FCFA)")
-    st.caption("Laissez vide si le fournisseur n'a pas chiffré l'article. Décochez ✓ pour sortir un article du TCP.")
-    refs_l = [prix.ref_article(ctx, l["Code Article"], l["Désignation"], l["Référence"], l["Colisage"])
-              for _, l in lignes.iterrows()]
-    grille = pd.DataFrame({
-        "Inclure": True, "ID": lignes["_id"].values, "Désignation": lignes["Désignation"].map(as_text).values,
-        "Référence": lignes["Référence"].map(as_text).values, "Unité": lignes["Colisage"].map(as_text).values,
-        "Quantité": lignes["Reste à commander"].values,
-        "Dernier prix": [prix.colonnes_ref(x)["Dernier prix"] for x in refs_l],
-        "Meilleur prix passé": [prix.colonnes_ref(x)["Meilleur prix"] for x in refs_l],
-        "Meilleur 12 mois": [prix.colonnes_ref(x)["Meilleur 12 mois"] for x in refs_l],
-        "Prix moyen passé": [prix.colonnes_ref(x)["Prix moyen"] for x in refs_l]})
-    ref_de = dict(zip(lignes["_id"], refs_l))
-    lus, vers = _lecture_tcp(da, lignes, noms)
-    for j in range(nf):
-        grille[f"PU{j}"] = [lus[j].get(i) for i in lignes["_id"]]
-    cfg = {"ID": None, "Inclure": st.column_config.CheckboxColumn("✓", width="small"),
-           "Quantité": st.column_config.NumberColumn(min_value=0.0, format="%.2f")}
-    for j, n in enumerate(noms):
-        cfg[f"PU{j}"] = st.column_config.NumberColumn(n, min_value=0.0, step=1.0, format="%.0f")
-    ed = st.data_editor(grille, hide_index=True, width="stretch", column_config=cfg,
-                        disabled=["Désignation", "Référence", "Unité", "Dernier prix", "Meilleur prix passé",
-                                  "Meilleur 12 mois", "Prix moyen passé"],
-                        key=f"tcp-grille-{da['_id']}-{'|'.join(noms)}-{vers}")
-    ed = ed.loc[ed["Inclure"].astype(bool) & (ed["Quantité"].map(to_num) > 0)].reset_index(drop=True)
-    if not len(ed):
-        st.warning("Aucun article inclus.")
-        return
-    pu = pd.DataFrame({n: ed[f"PU{j}"].map(to_num) for j, n in enumerate(noms)})
-    if not (pu > 0).any().any():
-        st.caption("Saisissez les prix pour voir la comparaison.")
-        return
-
-    # ---- 2) meilleur prix et choix par article
-    def meilleur(i):
-        r = pu.iloc[i]
-        r = r[r > 0]
-        return r.idxmin() if len(r) else ""
-    best = [meilleur(i) for i in range(len(ed))]
-    st.markdown("##### 2. Fournisseur retenu par article")
-    st.caption("Par défaut : le moins cher de chaque article. Changez si besoin (délai, qualité, disponibilité…). "
-               "Un BC sera émis par fournisseur retenu.")
-    choix = pd.DataFrame({
-        "Désignation": ed["Désignation"], "Référence": ed["Référence"], "Quantité": ed["Quantité"],
-        "Meilleur prix": [f"{b} ({fmt_montant(pu.at[i, b])})" if b else "non chiffré" for i, b in enumerate(best)],
-        "Retenu": [b or None for b in best]})
-    empreinte = abs(hash(tuple(pu.round(2).to_numpy().ravel().tolist()) + tuple(ed["ID"]))) % 10 ** 8
-    ch = st.data_editor(choix, hide_index=True, width="stretch", disabled=["Désignation", "Référence", "Quantité",
-                                                                          "Meilleur prix"],
-                        column_config={"Retenu": st.column_config.SelectboxColumn("Fournisseur retenu", options=noms)},
-                        key=f"tcp-choix-{da['_id']}-{empreinte}")
-    retenus = [as_text(x) if as_text(x) in noms else "" for x in ch["Retenu"]]
-    sans_prix = [ed.at[i, "Désignation"] for i, n in enumerate(retenus) if n and pu.at[i, n] <= 0]
-    if sans_prix:
-        st.error("Le fournisseur retenu n'a pas chiffré : " + ", ".join(sans_prix))
-        return
-    _alerte_prix(ctx, [(ed.at[i, "Désignation"], pu.at[i, n], ref_de.get(ed.at[i, "ID"]))
-                       for i, n in enumerate(retenus) if n], "retenu")
-
-    # ---- 3) synthèse
-    q = ed["Quantité"].map(to_num)
-    synth = []
-    for n in noms:
-        chiffre = pu[n] > 0
-        synth.append({"Fournisseur": n, "Articles chiffrés": f"{int(chiffre.sum())}/{len(ed)}",
-                      "Total offre HT": (q * pu[n]).sum(),
-                      "Articles retenus": sum(1 for r in retenus if r == n),
-                      "Montant retenu HT": sum(q[i] * pu.at[i, n] for i, r in enumerate(retenus) if r == n)})
-    sy = pd.DataFrame(synth)
-    total_best = sum(q[i] * pu.at[i, b] for i, b in enumerate(best) if b)
-    total_ret = sy["Montant retenu HT"].sum()
-    complets = sy.loc[sy["Articles chiffrés"] == f"{len(ed)}/{len(ed)}"]
-    st.markdown("##### 3. Synthèse")
-    st.dataframe(sy.assign(**{c: sy[c].map(fmt_montant) for c in ("Total offre HT", "Montant retenu HT")}),
-                 hide_index=True, width="stretch")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total retenu HT", f"{fmt_montant(total_ret)} F")
-    m2.metric("Meilleur prix par article", f"{fmt_montant(total_best)} F",
-              help="Somme des prix les plus bas de chaque article")
-    if len(complets):
-        mono = complets.sort_values("Total offre HT").iloc[0]
-        m3.metric("Meilleure offre d'un seul fournisseur", f"{fmt_montant(mono['Total offre HT'])} F",
-                  help=f"{mono['Fournisseur']} (offre complète)")
-    non_retenus = [ed.at[i, "Désignation"] for i, r in enumerate(retenus) if not r]
-    if non_retenus:
-        st.warning("Sans fournisseur retenu (non commandés via ce TCP) : " + ", ".join(non_retenus))
-    motif = st.text_input("Motif des choix (facultatif)", key="tcp-motif",
-                          placeholder="Ex. : délai, qualité, disponibilité…")
-    obs = st.text_input("Observations du TCP (facultatif)", key="tcp-obs")
-    if st.button("Enregistrer le TCP", type="primary", key="tcp-save", disabled=not any(retenus)):
-        _enregistre_tcp(ctx, da, offres, ed, pu, retenus, best, sy, motif, obs)
+    import tcp_ia
+    tcp_ia.ecran(ctx, da, lignes)
 
 
 def _alerte_prix(ctx, items: list[tuple], quoi: str = "saisi"):
@@ -449,7 +313,10 @@ def _alerte_prix(ctx, items: list[tuple], quoi: str = "saisi"):
         st.warning(f"🟠 Prix {quoi} un peu au-dessus du prix moyen passé : " + ", ".join(oranges))
 
 
-def _enregistre_tcp(ctx, da, offres, ed, pu, retenus, best, sy, motif, obs):
+def _enregistre_tcp(ctx, da, offres, ed, pu, retenus, best, sy, motif, obs, extras: dict | None = None):
+    """extras (TCP intelligent) : Recommandation IA, Profil, Situation terrain, Recommandation suivie, details
+    {(ID_Ligne_DA, fournisseur): {Marque, Conformité, Qualité, Libellé devis, Recommandé}}, docs (devis à archiver)."""
+    extras = extras or {}
     store = ctx.get_store()
     p = params(ctx)
     auj = date.today()
@@ -471,7 +338,10 @@ def _enregistre_tcp(ctx, da, offres, ed, pu, retenus, best, sy, motif, obs):
            "Montant retenu HT": round(total_ret), "Moins-disant": "Meilleur prix par article",
            "Montant moins-disant HT": round(total_best), "Motif choix": motif.strip(),
            "Conditions offres": json.dumps(offres, ensure_ascii=False), "Acheteur": ctx.user["Nom"],
-           "Statut": "Établi", "N° BC": "", "Observations": obs.strip(), "Créé le": maintenant()}
+           "Statut": "Établi", "N° BC": "", "Observations": obs.strip(), "Créé le": maintenant(),
+           **{c: extras.get(c, "") for c in ("Recommandation IA", "Profil", "Situation terrain",
+                                             "Recommandation suivie")}}
+    details = extras.get("details") or {}
     hist = ctx.load("HISTORIQUE_ARTICLES")
     codes = dict(zip(hist["ID_Ligne"].map(as_text), hist["Code Article"].map(as_text)))
     lignes_off = []
@@ -486,15 +356,42 @@ def _enregistre_tcp(ctx, da, offres, ed, pu, retenus, best, sy, motif, obs):
                                "Quantité": to_num(l["Quantité"]), "Fournisseur": n, "Prix unitaire HT": prix,
                                "Montant HT": montant_ligne(l["Quantité"], prix),
                                "Retenu": "TRUE" if retenus[i] == n else "FALSE", "Date TCP": auj.isoformat(),
-                               "N° DA": row["N° DA"], "Chantier": row["Chantier"]})
+                               "N° DA": row["N° DA"], "Chantier": row["Chantier"],
+                               **details.get((as_text(l["ID"]), n), {})})
     with st.spinner("Enregistrement du TCP…"):
         store.append("TCP_OFFRES", lignes_off)
         store.append("TCP", [row])
+        _archive_devis(ctx, da, row, extras.get("docs") or [])
         _ajoute_fournisseurs(ctx, noms)
         ctx.refresh()
     pdf = pdf_tcp(ctx, row, lignes_off)
     st.session_state.tcp_ok = {"numero": numero, "pdf": pdf, "id_da": da["_id"], "id_tcp": id_tcp, "fours": fours_ret}
     st.rerun()
+
+
+def _archive_devis(ctx, da, row: dict, docs: list[dict]):
+    """Devis importés dans le TCP : fiche DOCUMENTS (+ fichier dans Google Drive si configuré)."""
+    import documents
+    if not docs:
+        return
+    fiches = []
+    for d in docs:
+        fiche = documents.fiche(ctx, {
+            "Type": "Devis / proforma", "N° document": d.get("numero", ""), "Date document": d.get("date", ""),
+            "Fournisseur": d.get("fournisseur", ""), "ID_DA": row["ID_DA"], "N° DA": row["N° DA"],
+            "Chantier": row["Chantier"], "ID_TCP": row["ID_TCP"], "N° TCP": row["N° TCP"],
+            "Nom fichier": d.get("nom", ""), "Empreinte": documents.empreinte(d["octets"]), "Lu par IA": "Oui"})
+        if documents.configure():
+            try:
+                nom, octets, mime = documents.preparer(d["nom"], d["octets"])
+                nom = f"Devis {d.get('numero') or 'sans n°'} - {d.get('fournisseur', '')} - {row['N° TCP']} - {nom}"
+                fiche["ID Drive"], fiche["Lien"] = documents.envoyer(
+                    nom, octets, mime, f"{date.today():%Y}/{date.today():%m}", f"{row['N° TCP']} / DA {row['N° DA']}")
+                fiche["Nom fichier"] = nom
+            except documents.DocErreur as e:
+                st.warning(f"{e} Devis {d.get('nom')} non archivé.")
+        fiches.append(fiche)
+    ctx.get_store().append("DOCUMENTS", fiches)
 
 
 def pdf_tcp(ctx, tcp: dict, offres_rows: list[dict] | None = None) -> bytes:
