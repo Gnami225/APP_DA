@@ -52,6 +52,8 @@ def _mouvements(version, _ctx) -> pd.DataFrame:
     m["cle"] = [_cle(c, d, r) for c, d, r in zip(m["Code Article"], m["Désignation"], m["Référence"])]
     m["d"] = pd.to_datetime(m["Date"].map(to_date), errors="coerce")
     m["Magasin"] = m["Magasin"].map(as_text)
+    # mouvements « historiques » (fiches anciennes importées) : comptent dans les statistiques, pas dans le stock
+    m["hist"] = m["Historique"].map(as_text).eq("Oui") if "Historique" in m else False
     return m
 
 
@@ -66,7 +68,10 @@ def _stock(version, _ctx) -> pd.DataFrame:
         return pd.DataFrame(columns=["Magasin", "cle", "Code Article", "Désignation", "Référence", "Unité", "Stock",
                                      "Sorties 30 j", "Dernier mouvement"])
     d30 = pd.Timestamp(date.today() - timedelta(days=30))
-    m = m.sort_values("d")
+    m = m.loc[~m["hist"]].sort_values("d")
+    if not len(m):
+        return pd.DataFrame(columns=["Magasin", "cle", "Code Article", "Désignation", "Référence", "Unité", "Stock",
+                                     "Sorties 30 j", "Dernier mouvement"])
     g = m.groupby(["Magasin", "cle"], sort=False)
     t = g.agg(**{"Code Article": ("Code Article", "last"), "Désignation": ("Désignation", "last"),
                  "Référence": ("Référence", "last"), "Unité": ("Unité", "last"), "Stock": ("q", "sum"),
@@ -138,6 +143,10 @@ GUIDE = """Module Magasin de l'application PWC (un magasin par chantier ; le mag
 - Transfert : envoyer des articles à un autre magasin ; l'autre magasinier confirme la réception.
 - Inventaire : compter les articles et saisir les quantités comptées (ou dicter, ou importer un fichier Excel) ;
   l'application corrige le stock. Le premier inventaire sert de stock de départ.
+- Fiches (IA) : prendre en photo les fiches papier (fiche de tenue de stock, fiche de flux / bon de sortie, fiche
+  d'inventaire) ou importer le PDF / Excel ; l'IA lit chaque ligne, l'application recalcule les soldes et les compare
+  à ceux de la fiche (❌ = à vérifier), repère ce qui est déjà enregistré. Cocher / corriger puis « Enregistrer ».
+  « Courant » met le stock à jour ; « Historique » sert seulement aux statistiques (anciennes fiches).
 - Un article qui n'est pas dans la liste : prévenir l'administrateur (catalogue)."""
 
 
@@ -161,7 +170,7 @@ def onglet_magasin(ctx, magasin: str | None = None):
                 f"· 🚚 **{_nb_bc_attendus(ctx, mag)}** BC attendu(s) · 🔁 **{nt}** transfert(s) à recevoir")
     if st.session_state.get("mag_msg"):
         st.success(st.session_state.pop("mag_msg"))
-    vues = ["📥 Réception", "📤 Sortie", "📦 Mon stock", "🔁 Transfert", "📋 Inventaire", "❓ Aide"]
+    vues = ["📥 Réception", "📤 Sortie", "📦 Mon stock", "📄 Fiches (IA)", "🔁 Transfert", "📋 Inventaire", "❓ Aide"]
     v = st.segmented_control("Magasin", vues, default="📦 Mon stock", key=f"mag-vue-{mag}",
                              label_visibility="collapsed") or "📦 Mon stock"
     if v == "📥 Réception":
@@ -175,6 +184,9 @@ def onglet_magasin(ctx, magasin: str | None = None):
         _transferts(ctx, mag)
     elif v == "📋 Inventaire":
         _inventaire(ctx, mag)
+    elif v == "📄 Fiches (IA)":
+        import fiches_stock
+        fiches_stock.vue_import(ctx, mag)
     else:
         from assistant_da import _aide
         if ia.disponible():
@@ -433,6 +445,7 @@ def _inventaire(ctx, mag):
     cat = {as_text(c): (as_text(d), as_text(r), as_text(u)) for c, d, r, u in
            zip(art["Code Article"], art["Désignation"], art["Référence"], art["Colisage"])}
     premier = not len(t)
+    st.caption("📷 Fiche d'inventaire papier ? Prenez-la en photo dans « 📄 Fiches (IA) ».")
     st.caption(("Premier inventaire : il fixe le **stock de départ** du magasin. " if premier else "")
                + "Saisissez les quantités **comptées** ; l'application calcule l'écart avec le stock de l'application "
                  "et le corrige. Laissez vide ce qui n'a pas été compté.")

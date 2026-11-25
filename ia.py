@@ -145,7 +145,7 @@ FONCTIONS = {
     "vue_sourcing": "Cotations (sourcing)", "_table_decisions": "Catalogage (propositions)",
     "_catalogage_auto": "Catalogage automatique", "lire_devis": "TCP : lecture des devis",
     "modifier_offres": "TCP : saisie en langage naturel", "recommander_tcp": "TCP : recommandation",
-    "motif_tcp": "TCP : rédaction du motif"}
+    "motif_tcp": "TCP : rédaction du motif", "lire_fiche_stock": "Magasin : lecture des fiches de stock"}
 _JOURNAL = {"lignes": [], "depuis": None, "store": None}
 
 
@@ -263,14 +263,23 @@ def agent(system: str, messages: list[dict], outils: dict, max_tours: int = 6) -
 
 
 # =========================================================================== fichiers (images, PDF)
-def bloc_fichier(nom: str, contenu: bytes) -> dict:
-    """Bloc image (réduite à 1 600 px) ou PDF pour l'API."""
+def bloc_fichier(nom: str, contenu: bytes, max_px: int = 1600) -> dict:
+    """Bloc image (réduite à 1 600 px) ou PDF pour l'API ; un Excel / CSV est envoyé sous forme de texte."""
+    if nom.lower().endswith((".xlsx", ".xls", ".csv")):
+        import pandas as pd
+        if nom.lower().endswith(".csv"):
+            feuilles = {"CSV": pd.read_csv(io.BytesIO(contenu), sep=None, engine="python", header=None)}
+        else:
+            feuilles = pd.read_excel(io.BytesIO(contenu), sheet_name=None, header=None)
+        txt = "\n\n".join(f"### Feuille {n}\n" + f.dropna(how="all").dropna(axis=1, how="all").head(1500)
+                           .to_csv(sep=";", index=False, header=False) for n, f in feuilles.items())
+        return {"type": "text", "text": f"Contenu du fichier {nom} :\n{txt[:150000]}"}
     if nom.lower().endswith(".pdf"):
         return {"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
                                                "data": base64.b64encode(contenu).decode()}}
     from PIL import Image, ImageOps
     im = ImageOps.exif_transpose(Image.open(io.BytesIO(contenu))).convert("RGB")
-    im.thumbnail((1600, 1600))
+    im.thumbnail((max_px, max_px))
     buf = io.BytesIO()
     im.save(buf, "JPEG", quality=85)
     return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
@@ -695,6 +704,66 @@ def motif_tcp(donnees: dict) -> str:
                  "phrases professionnelles, factuelles et chiffrées, qui expliquent pourquoi certains articles ne sont "
                  "pas attribués au moins-disant (délai, conformité, qualité, urgence chantier, fiabilité…). Réponds avec "
                  "le motif seul.", json.dumps(donnees, ensure_ascii=False, default=str), rapide=True, max_tokens=600)
+
+
+# =========================================================================== 2 ter. fiches de stock (magasin)
+_OUTIL_FICHE = {
+    "name": "lire_fiche_stock",
+    "description": "Contenu d'une fiche de magasin (tenue de stock, bon / fiche de flux, inventaire) ligne par ligne.",
+    "input_schema": {"type": "object", "properties": {
+        "type_fiche": {"type": "string", "enum": ["tenue_de_stock", "flux", "inventaire", "autre"],
+                       "description": "tenue_de_stock = UN article, plusieurs dates, colonne stock / solde ; flux = bon "
+                                      "ou fiche de sortie / d'entrée avec plusieurs articles ; inventaire = comptage"},
+        "magasin": {"type": "string"}, "chantier": {"type": "string"},
+        "numero_fiche": {"type": "string", "description": "numéro de page / de fiche écrit en haut"},
+        "article": {"type": "object", "description": "en-tête d'une fiche de tenue de stock (sinon vide)",
+                    "properties": {"designation": {"type": "string", "description": "nature propre en MAJUSCULES, "
+                                                                                    "ex. GASOIL, PNEU"},
+                                   "reference": {"type": "string"},
+                                   "precision": {"type": "string", "description": "fournisseur / marque écrit entre "
+                                                                                 "parenthèses, etc."},
+                                   "unite": {"type": "string", "description": "unité (L pour le carburant…)"}}},
+        "report": {"type": ["number", "null"], "description": "stock « à reporter » / report de la page précédente "
+                                                              "écrit avant la première ligne"},
+        "lignes": {"type": "array", "items": {"type": "object", "properties": {
+            "date": {"type": "string", "description": "AAAA-MM-JJ ; une ligne sans date reprend la date de la ligne "
+                                                      "au-dessus"},
+            "numero_bon": {"type": "string", "description": "n° de bon (colonne N° BC / N° bon) ; reprend celui du "
+                                                            "dessus s'il n'est écrit qu'une fois"},
+            "sens": {"type": "string", "enum": ["sortie", "entree", "inventaire"]},
+            "designation": {"type": "string", "description": "article de la ligne (fiche de flux / inventaire) ; "
+                                                             "vide sur une fiche de tenue de stock"},
+            "reference": {"type": "string"},
+            "quantite": {"type": "number", "description": "quantité sortie / entrée / comptée, positive"},
+            "unite": {"type": "string"},
+            "engin": {"type": "string", "description": "engin ou bénéficiaire tel qu'écrit (ex. Pelle Volvo, "
+                                                       "Benne, Chargeuse)"},
+            "code_parc": {"type": "string", "description": "code parc s'il est écrit (ex. PEL007, BUL003, BE10004, "
+                                                           "CHG001, CPT013)"},
+            "immatriculation": {"type": "string", "description": "immatriculation / modèle entre parenthèses "
+                                                                 "(ex. AA-266-CK, 966 JV01, DX340)"},
+            "provenance": {"type": "string", "description": "fournisseur / magasin d'origine d'une entrée"},
+            "solde_ecrit": {"type": ["number", "null"], "description": "valeur de la colonne STOCK / solde de la "
+                                                                       "ligne, telle qu'écrite"},
+            "observation": {"type": "string"},
+            "doute": {"type": "boolean", "description": "true si un chiffre ou un mot est difficile à lire"}},
+            "required": ["sens", "quantite"]}},
+        "remarques": {"type": "string"}},
+        "required": ["type_fiche", "lignes"]}}
+
+
+def lire_fiche_stock(nom: str, contenu: bytes, magasin: str = "") -> dict:
+    """Lit une fiche manuscrite ou un fichier de magasin et en sort les mouvements ligne par ligne."""
+    return structure(CONTEXTE_PWC + " Tu lis les fiches papier tenues par les magasiniers de chantier (souvent "
+                     "manuscrites, photographiées). Lis CHAQUE ligne dans l'ordre, sans en sauter ni en inventer. "
+                     "Recopie les quantités et les soldes exactement comme écrits (ne les corrige pas : l'application "
+                     "contrôle les calculs). Dates au format AAAA-MM-JJ (« 23/11/26 » = 2026-11-23). Sur une fiche de "
+                     "tenue de stock, l'article est dans l'en-tête et chaque ligne est un mouvement de cet article ; "
+                     "le texte de la ligne est alors l'engin / le bénéficiaire. Marque doute = true quand c'est "
+                     "difficile à lire.",
+                     [bloc_fichier(nom, contenu, max_px=2200),
+                      {"type": "text", "text": f"Magasin attendu : {magasin or 'inconnu'}. Lis la fiche."}],
+                     _OUTIL_FICHE, max_tokens=8000)
 
 
 # =========================================================================== 3. catalogage

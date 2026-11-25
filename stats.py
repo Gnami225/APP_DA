@@ -18,7 +18,8 @@ import graphs
 from logic import as_text, fmt_montant, to_date, to_num
 from schema import LIGNE_BC_RETIREE
 
-SECTIONS = ["🤖 Assistant IA", "Vue d'ensemble", "ABC / XYZ", "Fournisseurs", "Prix", "Processus", "Contrôles (audit)"]
+SECTIONS = ["🤖 Assistant IA", "Vue d'ensemble", "ABC / XYZ", "Fournisseurs", "Prix", "Processus", "Contrôles (audit)",
+            "📦 Stocks & consommations"]
 HORS = "HORS CATALOGUE"
 
 
@@ -52,6 +53,10 @@ def _lignes(ctx) -> pd.DataFrame:
         "montant": [to_num(m) * f_rg.get(as_text(i), 1) for m, i in zip(bl["Montant HT"], bl["ID_BC"])],
         "statut": bl["ID_BC"].map(lambda i: st_bc.get(as_text(i), "")),
         "source": "Application"})
+    import stats_stock
+    rep = stats_stock.ids_reprise(ctx)
+    if rep:
+        b.loc[bl["ID_BC"].map(as_text).isin(rep).values, "source"] = "Reprise BC antérieurs"
     b = b.loc[b["statut"].isin(["Validé", "Émis"])]
     df = pd.concat([a, b], ignore_index=True)
     df = df.loc[df["date"].notna() & (df["montant"] > 0)].copy()
@@ -224,8 +229,10 @@ def nigrini(mad: float) -> str:
 
 # =========================================================================== interface
 def onglet_statistiques(ctx):
-    st.caption("Tableau de bord quantitatif des achats — historique importé et BC de l'application. "
-               "Section réservée aux administrateurs.")
+    st.caption("Tableau de bord quantitatif des achats (historique importé, BC repris, BC de l'application) et des "
+               "stocks. Section réservée aux administrateurs.")
+    import stats_stock
+    stats_stock.panneau_couverture(ctx)
     df0 = base(ctx)
     if not len(df0):
         st.info("Aucune donnée d'achat : importez l'historique des prix ou validez des BC.")
@@ -242,7 +249,8 @@ def onglet_statistiques(ctx):
                                                                     "ci-dessus, et toutes les DA"),
      "Vue d'ensemble": _vue_ensemble, "ABC / XYZ": _vue_abc, "Fournisseurs": _vue_fournisseurs,
      "Prix": _vue_prix, "Processus": lambda d: _vue_processus(ctx, d),
-     "Contrôles (audit)": lambda d: _vue_controles(d, df_tout)}[sec](df)
+     "Contrôles (audit)": lambda d: _vue_controles(d, df_tout),
+     "📦 Stocks & consommations": lambda d: stats_stock.vue_stocks(ctx, d)}[sec](df)
     st.divider()
     _export(df)
 
@@ -310,7 +318,8 @@ def _filtres(df: pd.DataFrame) -> pd.DataFrame:
     refs = opts["sta-re"]
     c5.multiselect("Références", refs, key="sta-re", placeholder="Toutes" if refs else "—",
                    help="Liste limitée aux références des désignations, familles et chantiers choisis")
-    src = c6.selectbox("Source", ["Toutes", "Historique importé", "Application"], key="sta-src")
+    src = c6.selectbox("Source", ["Toutes", "Historique importé", "Reprise BC antérieurs", "Application"],
+                       key="sta-src")
     t1, t2 = st.columns(2)
     emis = t1.toggle("Inclure les BC émis non encore validés (dépense engagée)", value=True, key="sta-emis")
     nb_ab = int(df["aberrant"].sum())

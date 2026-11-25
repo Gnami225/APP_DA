@@ -48,7 +48,7 @@ TABLES = {
     "STOCK_MOUVEMENTS": ["ID_Mouvement", "Date", "Magasin", "Type", "Code Article", "Désignation", "Référence",
                          "Unité", "Quantité", "Code_Parc", "Bénéficiaire", "Motif", "ID_BC", "N° BC", "N° BL",
                          "ID_Livraison", "ID_Transfert", "Magasin lié", "Statut", "Valeur unitaire", "Saisi par",
-                         "Créé le"],
+                         "Créé le", "N° bon", "Historique", "Source", "ID_Document", "Solde fiche"],
     # consommation de l'API Claude (estimation par appel)
     "CONSO_IA": ["Date", "Utilisateur", "Fonction", "Modèle", "Jetons entrée", "Jetons sortie", "Recherches web",
                  "Coût estimé $"],
@@ -97,10 +97,10 @@ ROLES_DA = {"Demandeur", "Chef de service", "Admin"}  # saisissent des DA (assis
 CIVILITES = ["M.", "Mme"]
 ROLES_STOCK_VUE = {"Admin", "Direction", "Acheteur"}  # consultent les stocks de tous les magasins
 # magasin = chantier (un magasin par chantier) ; le magasinier ne voit que le magasin de son chantier
-TYPES_MOUVEMENT = {"Entrée réception": 1, "Entrée transfert": 1, "Stock initial": 1, "Sortie": -1,
+TYPES_MOUVEMENT = {"Entrée réception": 1, "Entrée": 1, "Entrée transfert": 1, "Stock initial": 1, "Sortie": -1,
                    "Sortie transfert": -1, "Ajustement inventaire": 0}  # 0 : signe porté par la quantité
 ZONES_SOURCING = ["Côte d'Ivoire", "Afrique de l'Ouest", "International"]
-TYPES_DOCUMENT = ["Bon de livraison", "Devis / proforma", "Facture", "Autre"]
+TYPES_DOCUMENT = ["Bon de livraison", "Devis / proforma", "Facture", "Fiche de stock", "Autre"]
 
 STATUTS_BC = ["Émis", "Validé", "Rejeté", "Annulé"]
 STATUTS_CATALOGAGE = ["À analyser", "Intégré", "Rattaché", "Rejeté"]
