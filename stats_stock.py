@@ -12,7 +12,17 @@ import streamlit as st
 import graphs
 from logic import as_text, fmt_montant, to_date, to_num
 
-CARBURANTS = ("GASOIL", "GAZOIL", "GAS OIL", "GASOLE", "CARBURANT", "SUPER", "ESSENCE", "HUILE", "LUBRIFIANT")
+CARBURANTS = {"GASOIL", "GAZOIL", "GASOLE", "CARBURANT", "ESSENCE", "SUPER", "PETROLE", "HUILE", "LUBRIFIANT",
+              "GRAISSE", "ADBLUE"}
+
+
+def _est_carburant(designation, famille) -> bool:
+    """Carburant / lubrifiant d'après la famille du catalogue ou le premier mot de la désignation."""
+    f = as_text(famille).upper()
+    if any(x in f for x in ("CARBURANT", "LUBRIFIANT", "HUILE")):
+        return True
+    mots = as_text(designation).upper().replace("-", " ").split()
+    return bool(mots) and (mots[0] in CARBURANTS or " ".join(mots[:2]) == "GAS OIL")
 
 
 def _f(v) -> str:
@@ -206,15 +216,15 @@ def vue_stocks(ctx, achats: pd.DataFrame | None = None):
             graphs.barres(r, "Article", "Valeur (F)", "Articles les plus consommés", "sts-art-g", unite="F CFA", top=15)
 
         # ---- carburant : litres par engin et par mois
-        carb = so.loc[so["Désignation"].map(lambda d: any(x in as_text(d).upper() for x in CARBURANTS))]
+        carb = so.loc[[_est_carburant(d, f) for d, f in zip(so["Désignation"], so["Famille"])]]
         if len(carb):
             st.markdown("##### ⛽ Carburant et lubrifiants")
-            pv = carb.pivot_table(index=["Engin"], columns="mois", values="Qté", aggfunc="sum", fill_value=0)
+            pv = carb.pivot_table(index=["Engin", "Article"], columns="mois", values="Qté", aggfunc="sum", fill_value=0)
             pv["Total"] = pv.sum(axis=1)
             pv = pv.sort_values("Total", ascending=False)
-            produits = ", ".join(sorted(carb["Article"].unique())[:4])
-            st.caption(f"Quantités sorties ({produits}) par engin et par mois — "
-                       f"total {carb['Qté'].sum():,.0f} {as_text(carb['Unité'].iloc[0])}".replace(",", " "))
+            tot = carb.groupby("Article").agg(q=("Qté", "sum"), u=("Unité", "last"))
+            st.caption("Quantités sorties par engin, par produit et par mois — total : "
+                       + " · ".join(f"{a} {r.q:,.0f} {as_text(r.u)}".replace(",", " ") for a, r in tot.iterrows()))
             st.dataframe(pv.reset_index(), hide_index=True, width="stretch",
                          column_config={c: st.column_config.NumberColumn(format="%.0f") for c in pv.columns})
 

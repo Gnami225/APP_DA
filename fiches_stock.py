@@ -32,18 +32,38 @@ TYPES_FICHE = {"tenue_de_stock": "Fiche de tenue de stock", "flux": "Fiche de fl
 
 
 # =========================================================================== rapprochements
-def _article(ctx, des: str, ref: str, unite: str) -> dict:
-    """Article du catalogue le plus proche (sinon l'article tel que lu, sans code)."""
+def _norm(t) -> str:
+    return "".join(ch for ch in ia._plat(t) if ch.isalnum())
+
+
+def _article(ctx, des: str, ref: str, unite: str, mag: str = "") -> dict:
+    """Article le plus proche : d'abord parmi les articles déjà suivis dans ce magasin (même libellé = même stock),
+    puis dans le catalogue (référence identique = même article ; sinon désignation et référence très proches).
+    Sans correspondance : l'article tel que lu, suivi sous son libellé (proposé ensuite au catalogage)."""
     des, ref = " ".join(as_text(des).upper().split()), " ".join(as_text(ref).upper().split())
-    if des:
-        art = ctx.load("ARTICLES")
-        for c in ia.candidats(art, f"{des} {ref}".strip(), n=5, version=ctx.version()):
-            d, r = as_text(c["designation"]).upper(), as_text(c["reference"]).upper()
-            sd = difflib.SequenceMatcher(None, ia._plat(des), ia._plat(d)).ratio()
-            sr = 1.0 if not ref and not r else difflib.SequenceMatcher(None, ia._plat(ref), ia._plat(r)).ratio()
-            if sd >= 0.85 and sr >= 0.8:
-                return {"Code Article": as_text(c["code"]), "Désignation": d, "Référence": r,
-                        "Unité": as_text(c["colisage"]) or as_text(unite)}
+    if not des:
+        return {"Code Article": "", "Désignation": "", "Référence": ref, "Unité": as_text(unite)}
+    nd, nr = _norm(des), _norm(ref)
+    # 1) déjà en stock dans ce magasin (y compris hors catalogue)
+    if mag:
+        t = magasin.stock(ctx, mag)
+        for c, d, r, u in zip(t["Code Article"], t["Désignation"], t["Référence"], t["Unité"]):
+            if _norm(d) == nd and _norm(r) == nr:
+                return {"Code Article": as_text(c), "Désignation": as_text(d), "Référence": as_text(r),
+                        "Unité": as_text(unite) or as_text(u), "Unité catalogue": as_text(u)}
+    # 2) catalogue
+    art = ctx.load("ARTICLES")
+    for c in ia.candidats(art, f"{des} {ref}".strip(), n=8, version=ctx.version()):
+        d, r = as_text(c["designation"]).upper(), as_text(c["reference"]).upper()
+        sd = difflib.SequenceMatcher(None, nd, _norm(d)).ratio()
+        if nr and _norm(r) == nr and sd >= 0.5:  # même référence fabricant / dimension
+            ok = True
+        else:
+            sr = 1.0 if not nr and not _norm(r) else difflib.SequenceMatcher(None, nr, _norm(r)).ratio()
+            ok = sd >= 0.85 and sr >= 0.85
+        if ok:
+            return {"Code Article": as_text(c["code"]), "Désignation": d, "Référence": r,
+                    "Unité": as_text(unite) or as_text(c["colisage"]), "Unité catalogue": as_text(c["colisage"])}
     return {"Code Article": "", "Désignation": des, "Référence": ref, "Unité": as_text(unite)}
 
 
@@ -90,7 +110,7 @@ def construire(ctx, mag: str, fiches: list[dict], mode: str) -> list[dict]:
         d = f["data"]
         tf = as_text(d.get("type_fiche"))
         ent = d.get("article") or {}
-        art_ent = _article(ctx, ent.get("designation"), ent.get("reference"), ent.get("unite")) \
+        art_ent = _article(ctx, ent.get("designation"), ent.get("reference"), ent.get("unite"), mag) \
             if tf == "tenue_de_stock" else None
         prec = as_text(ent.get("precision"))
         dates = [to_date(l.get("date")) for l in d.get("lignes") or []]
@@ -111,7 +131,7 @@ def construire(ctx, mag: str, fiches: list[dict], mode: str) -> list[dict]:
         for l, dt in zip(d.get("lignes") or [], dates):
             dl = dt or dl
             bon = as_text(l.get("numero_bon")) or bon
-            a = art_ent or _article(ctx, l.get("designation"), l.get("reference"), l.get("unite"))
+            a = art_ent or _article(ctx, l.get("designation"), l.get("reference"), l.get("unite"), mag)
             sens = as_text(l.get("sens"))
             mv = {"sortie": "Sortie", "entree": "Entrée", "inventaire": "Inventaire"}.get(sens, "Sortie")
             q = abs(float(to_num(l.get("quantite"))))
@@ -130,6 +150,9 @@ def construire(ctx, mag: str, fiches: list[dict], mode: str) -> list[dict]:
             rem = []
             if l.get("doute"):
                 rem.append("⚠️ lecture douteuse")
+            uf, uc = as_text(l.get("unite")) or as_text(ent.get("unite")), as_text(a.get("Unité catalogue"))
+            if uf and uc and _norm(uf).rstrip("S") != _norm(uc).rstrip("S"):
+                rem.append(f"⚠️ unité fiche « {uf} » ≠ stock / catalogue « {uc} » : convertir la quantité")
             if not a["Désignation"]:
                 rem.append("article non lu")
             elif not a["Code Article"]:
@@ -302,7 +325,7 @@ def vue_import(ctx, mag: str):
               "Statut": as_text(r["Statut"]) or "Courant"}
         if any(nv[k] != l.get(k) for k in nv):
             if (nv["Désignation"], nv["Référence"]) != (l["Désignation"], l["Référence"]):
-                nv.update(_article(ctx, nv["Désignation"], nv["Référence"], nv["Unité"]))
+                nv.update(_article(ctx, nv["Désignation"], nv["Référence"], nv["Unité"], mag))
             l.update(nv)
             change = True
     if change:
@@ -325,7 +348,9 @@ def vue_import(ctx, mag: str):
         else:
             proj[k] = proj.get(k, 0.0) + (l["Quantité"] if l["Mouvement"] in ("Entrée", "Stock initial") else
                                           -l["Quantité"])
-    neg = [f"{k.split('|')[0].replace('T:', '')} ({v:g})" for k, v in proj.items() if v < -1e-6]
+    lib = {magasin._cle(l["Code Article"], l["Désignation"], l["Référence"]):
+           f"{l['Désignation']} {l['Référence']}".strip() for l in sel}
+    neg = [f"{lib.get(k, k)} ({v:g})" for k, v in proj.items() if v < -1e-6]
     if neg:
         st.warning("Stock négatif après import (sorties sans stock de départ ?) : " + ", ".join(neg[:8])
                    + ". Ajoutez la fiche précédente, un inventaire, ou passez ces lignes en Historique.")

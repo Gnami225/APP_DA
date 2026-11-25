@@ -718,7 +718,8 @@ _OUTIL_FICHE = {
         "numero_fiche": {"type": "string", "description": "numéro de page / de fiche écrit en haut"},
         "article": {"type": "object", "description": "en-tête d'une fiche de tenue de stock (sinon vide)",
                     "properties": {"designation": {"type": "string", "description": "nature propre en MAJUSCULES, "
-                                                                                    "ex. GASOIL, PNEU"},
+                                                                                    "ex. GASOIL, PNEU, FILTRE A HUILE, "
+                                                                                    "CIMENT"},
                                    "reference": {"type": "string"},
                                    "precision": {"type": "string", "description": "fournisseur / marque écrit entre "
                                                                                  "parenthèses, etc."},
@@ -731,9 +732,13 @@ _OUTIL_FICHE = {
             "numero_bon": {"type": "string", "description": "n° de bon (colonne N° BC / N° bon) ; reprend celui du "
                                                             "dessus s'il n'est écrit qu'une fois"},
             "sens": {"type": "string", "enum": ["sortie", "entree", "inventaire"]},
-            "designation": {"type": "string", "description": "article de la ligne (fiche de flux / inventaire) ; "
-                                                             "vide sur une fiche de tenue de stock"},
-            "reference": {"type": "string"},
+            "designation": {"type": "string", "description": "NATURE de l'article de la ligne (fiche de flux / "
+                                                             "inventaire), propre, en MAJUSCULES, au singulier : ex. "
+                                                             "FILTRE A HUILE, PNEU, CIMENT, FER A BETON, ROULEMENT, "
+                                                             "GASOIL ; vide sur une fiche de tenue de stock"},
+            "reference": {"type": "string", "description": "référence fabricant, dimension, calibre, norme telle "
+                                                           "qu'écrite : ex. 1R-0762, 315/80 R22.5, CPA 42.5R, HA 12, "
+                                                           "6205-2RS"},
             "quantite": {"type": "number", "description": "quantité sortie / entrée / comptée, positive"},
             "unite": {"type": "string"},
             "engin": {"type": "string", "description": "engin ou bénéficiaire tel qu'écrit (ex. Pelle Volvo, "
@@ -755,7 +760,11 @@ _OUTIL_FICHE = {
 def lire_fiche_stock(nom: str, contenu: bytes, magasin: str = "") -> dict:
     """Lit une fiche manuscrite ou un fichier de magasin et en sort les mouvements ligne par ligne."""
     return structure(CONTEXTE_PWC + " Tu lis les fiches papier tenues par les magasiniers de chantier (souvent "
-                     "manuscrites, photographiées). Lis CHAQUE ligne dans l'ordre, sans en sauter ni en inventer. "
+                     "manuscrites, photographiées) : tout ce qui est stocké — carburants et lubrifiants, pièces "
+                     "détachées et consommables mécaniques, pneus, matériaux de BTP (ciment, fer, agglos, granulats…), "
+                     "outillage, quincaillerie, électricité, EPI… Lis CHAQUE ligne dans l'ordre, sans en sauter ni en "
+                     "inventer. Sépare la nature de l'article (designation) de sa référence / dimension (reference). "
+                     + EXEMPLES_DECOUPAGE + " "
                      "Recopie les quantités et les soldes exactement comme écrits (ne les corrige pas : l'application "
                      "contrôle les calculs). Dates au format AAAA-MM-JJ (« 23/11/26 » = 2026-11-23). Sur une fiche de "
                      "tenue de stock, l'article est dans l'en-tête et chaque ligne est un mouvement de cet article ; "
