@@ -5,6 +5,7 @@ DA_COLS = [
     "Demandeur", "Email Demandeur", "Responsable", "Priorité", "Date besoin",
     "Observations", "Signature Demandeur", "Statut", "Validé par",
     "Date validation", "Motif rejet", "Créé le", "Visa Resp. service", "Date visa Resp. service",
+    "Validé le", "Validé en tant que",
 ]
 
 LIGNE_COLS = [
@@ -32,7 +33,7 @@ TABLES = {
            "Condition règlement", "Total HT", "Taux TVA", "Montant TVA", "Total TTC", "Statut", "Acheteur",
            "Validé par", "Date validation", "Motif rejet", "ID_TCP", "N° TCP", "Observations", "Créé le",
            "Statut livraison", "Date livraison", "Modifié le", "Modifié par", "Total HT brut", "Remise globale %",
-           "Remise globale (F)"],
+           "Remise globale (F)", "Validé le", "Validé en tant que"],
     "BC_LIGNES": ["ID_LigneBC", "ID_BC", "N° BC", "N° Ligne", "ID_Ligne_DA", "Code Article", "Désignation",
                   "Référence", "Code_Parc", "Unité", "Quantité", "Prix unitaire HT", "Remise %", "Montant HT",
                   "Fournisseur", "Date BC", "Chantier", "N° DA", "TVA %", "Montant TVA",

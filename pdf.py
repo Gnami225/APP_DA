@@ -12,6 +12,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import (KeepTogether, Image, Paragraph, SimpleDocTemplate, Spacer, Table,
                                 TableStyle)
 
+import pandas as pd
 from logic import as_text, fmt_date
 
 NOIR = colors.black  # fiche 100 % noir sur blanc : aucun aplat, économie d'encre
@@ -65,6 +66,17 @@ def _qte(v) -> str:
     except (TypeError, ValueError):
         return as_text(v)
     return (f"{f:,.3f}".rstrip("0").rstrip(".")).replace(",", " ").replace(".", ",")
+
+
+def _cachet_direction(doc: dict, mot: str, style: str) -> Paragraph:
+    """Case visa quand la Direction valide elle-même : « VALIDÉ(E) PAR LA DIRECTION GÉNÉRALE », nom, date et heure en
+    gras, puis « Validé à distance »."""
+    esc = lambda t: as_text(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    quand = pd.to_datetime(as_text(doc.get("Validé le")) or as_text(doc.get("Date validation")), errors="coerce")
+    heure = (f"le {quand:%d/%m/%Y} à {quand:%Hh%M}" if pd.notna(quand) and as_text(doc.get("Validé le"))
+             else f"le {fmt_date(doc.get('Date validation'))}")
+    return Paragraph(f"<b>{mot} PAR LA {esc(doc.get('Validé en tant que')).upper()}</b><br/>"
+                     f"<b>{esc(doc.get('Validé par'))}</b><br/><b>{esc(heure)}</b><br/>Validé à distance", _s[style])
 
 
 def build_pdf(da: dict, lignes: list[dict], refs: dict) -> bytes:
@@ -162,11 +174,15 @@ def build_pdf(da: dict, lignes: list[dict], refs: dict) -> bytes:
         visa_resp = as_text(da.get("Visa Resp. service"))
         v_resp = _p(f"Nom : {visa_resp or as_text(da.get('Responsable'))}\n"
                     f"Date : {fmt_date(da.get('Date visa Resp. service'))}\n"
-                    + ("Validé dans l'application" if visa_resp else "Signature :"))
+                    + ("Validé à distance" if visa_resp else "Signature :"))
         dg_ok = statut in ("Validée DG", "Validée")
-        v_val = _p(f"Nom : {as_text(da.get('Validé par')) if dg_ok else ''}\n"
-                   f"Date : {fmt_date(da.get('Date validation')) if dg_ok else ''}\n"
-                   + ("Validé dans l'application" if dg_ok else "Signature :"))
+        qualite = as_text(da.get("Validé en tant que"))
+        if dg_ok and qualite:  # validée par la Direction elle-même : cachet en gras, nom, date et heure
+            v_val = _cachet_direction(da, "VALIDÉE", "cell")
+        else:
+            v_val = _p(f"Nom : {as_text(da.get('Validé par')) if dg_ok else ''}\n"
+                       f"Date : {fmt_date(da.get('Date validation')) if dg_ok else ''}\n"
+                       + ("Validé à distance" if dg_ok else "Signature :"))
         visas = Table([[_p(h, "th") for h in ["LE DEMANDEUR", "VISA RESPONSABLE DU SERVICE",
                                                "VALIDATION DIRECTION GÉNÉRALE"]],
                        [v_dem, v_resp, v_val]],
@@ -262,7 +278,7 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     numero = as_text(bc.get("N° BC"))
     statut = as_text(bc.get("Statut"))
     societe = as_text(param.get("Nom Société")) or "PUBLIC WORK CONTRACTOR (PWC)"
-    avert = {"Annulé": "BC ANNULÉ", "Rejeté": "BC REJETÉ"}.get(statut, "")
+    avert = {"Annulé": "BC ANNULÉ", "Rejeté": "BC REJETÉ", "Émis": "EN ATTENTE DE VALIDATION"}.get(statut, "")
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=12 * mm, rightMargin=12 * mm,
                             topMargin=11 * mm, bottomMargin=12 * mm, title=numero or "Bon de commande", author=societe)
     cw = [50 * mm, 27 * mm, 18 * mm, 12 * mm, 13 * mm, 20 * mm, 11 * mm, 11 * mm, 24 * mm]   # 186 mm
@@ -339,6 +355,10 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     visa = "Signature"
     if statut == "Validé":
         visa = f"Signature\n\nValidé par {as_text(bc.get('Validé par'))}\nle {fmt_date(bc.get('Date validation'))}"
+    elif statut == "Émis":
+        visa = "Signature\n\nEn attente de validation"
+    p_visa = (_cachet_direction(bc, "VALIDÉ", "bc_i") if statut == "Validé" and as_text(bc.get("Validé en tant que"))
+              else _p(visa, "bc_i"))
     cond = _p(f"<b>Conditions de règlement :</b> {as_text(bc.get('Condition règlement'))}", "bc_l")
     cond.__init__(cond.text.replace("&lt;b&gt;", "<b>").replace("&lt;/b&gt;", "</b>"), cond.style)
     obs = as_text(bc.get("Observations"))
@@ -356,7 +376,7 @@ def build_bc_pdf(bc: dict, lignes: list[dict], param: dict, chantier_nom: str = 
     h_obs = max((nt - 1) * 6 * mm, p_obs.wrap(sum(cw[:5]) - 12, 1000)[1] + 8)  # observations longues : la case s'agrandit
     data = [[cond if i == 0 else (p_obs if i == 1 else ""), "", _p(l, "bc_rb"), _p(v, "bc_rb")]
             for i, (l, v) in enumerate(tots)]
-    data.append([_p("Mentionner T.V.A sur facture\nExemplaire à joindre à la facture", "bc_i"), "", _p(visa, "bc_i"), ""])
+    data.append([_p("Mentionner T.V.A sur facture\nExemplaire à joindre à la facture", "bc_i"), "", p_visa, ""])
     hauteurs = [6 * mm] * nt + [20 * mm]
     hauteurs[nt - 1] = h_obs - (nt - 2) * 6 * mm
     pied = Table(data, colWidths=[sum(cw[:4]), cw[4], cw[5] + cw[6] + cw[7], cw[8]], rowHeights=hauteurs)

@@ -927,12 +927,37 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
              "✏️ Corriger et renvoyer la DA" if rejet else "✏️ Modifier la DA")
     with st.expander(titre, expanded=rejet):
         if admin:
-            st.caption("Modification administrateur : le statut et les visas de la DA ne changent pas. Les articles "
-                       "déjà commandés (BC) ne peuvent pas être retirés.")
+            st.caption("Modification administrateur : tout est modifiable (en-tête, désignations, références, "
+                       "quantités…) ; le statut, les visas et le N° DA ne changent pas. Les articles déjà commandés "
+                       "(BC) ne peuvent pas être retirés, et leur BC garde son propre libellé.")
         elif statut == "Validée Resp. service" and not (user["Rôle"] in ROLES_DG or (
                 user["Rôle"] == "Chef de service" and as_text(user.get("Service")) == as_text(d["Service Demandeur"]))):
             st.warning("Cette DA a déjà le visa du responsable de service : après modification, elle repart chez lui "
                        "pour un nouveau visa.")
+        entete = {}
+        if admin:
+            rf = refs()
+            a1, a2, a3 = st.columns(3)
+            chs = list(rf["chantiers"]) or [as_text(d["Chantier"])]
+            if as_text(d["Chantier"]) not in chs:
+                chs.append(as_text(d["Chantier"]))
+            entete["Chantier"] = a1.selectbox("Chantier", chs, index=chs.index(as_text(d["Chantier"])),
+                                              format_func=lambda c: rf["chantiers"].get(c, c), key=f"mod-ch-{id_da}")
+            svs = list(rf["services"])
+            if as_text(d["Service Demandeur"]) not in svs:
+                svs.append(as_text(d["Service Demandeur"]))
+            entete["Service Demandeur"] = a2.selectbox("Service demandeur", svs,
+                                                       index=svs.index(as_text(d["Service Demandeur"])),
+                                                       format_func=lambda c: rf["services"].get(c, c),
+                                                       key=f"mod-sv-{id_da}")
+            dda = a3.date_input("Date de la DA", value=to_date(d.get("Date DA")), format="DD/MM/YYYY",
+                                key=f"mod-dda-{id_da}")
+            entete["Date DA"] = dda.isoformat() if dda else as_text(d.get("Date DA"))
+            b1, b2, b3 = st.columns(3)
+            entete["Demandeur"] = b1.text_input("Demandeur", value=as_text(d.get("Demandeur")), key=f"mod-dem-{id_da}")
+            entete["Responsable"] = b2.text_input("Responsable", value=as_text(d.get("Responsable")),
+                                                  key=f"mod-resp-{id_da}")
+            entete["Code DA"] = b3.text_input("Code DA", value=as_text(d.get("Code DA")), key=f"mod-cda-{id_da}")
         c1, c2 = st.columns(2)
         prio = c1.selectbox("Priorité", PRIORITES, key=f"mod-prio-{id_da}",
                             index=PRIORITES.index(as_text(d["Priorité"])) if as_text(d["Priorité"]) in PRIORITES else 0)
@@ -946,7 +971,7 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
             v[c] = v[c].map(as_text) if c != "Quantité" else v[c].map(lambda x: float(_num(x) or 0))
         st.caption("Modifiez directement le tableau. Pour retirer un article : cochez la ligne puis 🗑 (ou quantité 0).")
         ed = st.data_editor(v, hide_index=True, width="stretch", key=f"mod-ed-{id_da}", num_rows="delete",
-                            disabled=["N° Ligne", "Désignation", "Référence"],
+                            disabled=["N° Ligne"] if admin else ["N° Ligne", "Désignation", "Référence"],
                             column_config={"ID_Ligne": None,
                                            "Colisage": st.column_config.SelectboxColumn(
                                                options=sorted(set(COLISAGES) | set(v["Colisage"]) - {""})),
@@ -1007,13 +1032,22 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
             st.error("Article déjà commandé, impossible de le retirer (annulez d'abord le BC) : "
                      + ", ".join(retire_cmd))
             return
-        changes = {}
+        changes, relibelle = {}, False
         for idl in avant.index:
             if idl not in apres.index:  # ligne supprimée
                 changes[idl] = {"Statut ligne": "Annulée"}
                 continue
             diff = {c: as_text(apres.at[idl, c]) for c in ("Code_Parc", "Colisage", "Usage")
                     if as_text(apres.at[idl, c]) != as_text(avant.at[idl, c])}
+            if admin:  # l'administrateur corrige aussi les libellés ; l'article est recatalogué
+                for c in ("Désignation", "Référence"):
+                    nv = " ".join(as_text(apres.at[idl, c]).split())
+                    nv = nv.upper() if c == "Désignation" else nv
+                    if nv != as_text(avant.at[idl, c]):
+                        diff[c] = nv
+                if "Désignation" in diff or "Référence" in diff:
+                    diff["Code Article"] = ""
+                    relibelle = True
             q = float(apres.at[idl, "Quantité"] or 0)
             if q != float(avant.at[idl, "Quantité"] or 0):
                 diff["Quantité"] = q
@@ -1032,8 +1066,20 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
             catalogage.enregistrer(contexte(user), d, nouvelles, user)
             _catalogage_auto(user, as_text(d.get("ID_DA")))
         circuit_maj = {} if admin else {**depart, "Motif rejet": "", "Validé par": "", "Date validation": ""}
-        store.update("DA", "ID_DA", id_da, {**circuit_maj, "Observations": obs.strip(), "Priorité": prio,
+        store.update("DA", "ID_DA", id_da, {**circuit_maj, **{k: v.strip() for k, v in entete.items()},
+                                            "Observations": obs.strip(), "Priorité": prio,
                                             "Date besoin": besoin.isoformat() if besoin else ""})
+        if admin:  # copies de l'en-tête sur les lignes de la DA
+            maj_l = {col: entete[k] for k, col in (("Chantier", "DA_Chantier"), ("Service Demandeur", "DA_Service"),
+                                                    ("Date DA", "DA_Date"))
+                     if entete.get(k) and entete[k] != as_text(d.get(k))}
+            if maj_l:
+                store.update_many("HISTORIQUE_ARTICLES", "ID_Ligne", {as_text(i): maj_l for i in lg["ID_Ligne"]})
+        if relibelle:
+            try:
+                _catalogage_auto(user, id_da)
+            except Exception:
+                pass
         journaliser([_entree(d, "Admin" if admin else "Demandeur",
                              "Renvoyée après correction" if rejet else "Modifiée", user,
                              f"{len(changes)} ligne(s) modifiée(s), {len(nouvelles)} ajoutée(s)")])
@@ -1103,7 +1149,8 @@ def decider_da(user: dict, ids: list[str], valider: bool, motif: str = "") -> tu
             entrees.append(_entree(d, niveau, "Rejetée", user, motif))
             finales.append((i, "Rejetée"))
         elif dg:
-            ch = {"Statut": "Validée DG", "Validé par": user["Nom"], "Date validation": auj, "Motif rejet": ""}
+            ch = {"Statut": "Validée DG", "Validé par": user["Nom"], "Date validation": auj, "Motif rejet": "",
+                  **_trace_validation(user)}
             if s == "Émise":  # la DG supplée le responsable de service
                 ch.update({"Visa Resp. service": f"{user['Nom']} (suppléance)", "Date visa Resp. service": auj})
             changes[i] = ch
@@ -1257,6 +1304,11 @@ def nb_a_valider(user: dict) -> int:
     return len(da_a_valider(user))
 
 
+def _trace_validation(user: dict) -> dict:
+    from logic import trace_validation
+    return trace_validation(user)
+
+
 def _champs_statut(da: pd.DataFrame, id_da: str, statut: str, user: dict, motif: str = "") -> dict:
     """Champs à écrire quand l'admin force un statut (tableau de l'Administration)."""
     d = da.loc[da["ID_DA"] == id_da].iloc[0]
@@ -1264,15 +1316,15 @@ def _champs_statut(da: pd.DataFrame, id_da: str, statut: str, user: dict, motif:
     visa = as_text(d.get("Visa Resp. service"))
     if statut == "Émise":
         return {"Statut": "Émise", "Visa Resp. service": "", "Date visa Resp. service": "", "Validé par": "",
-                "Date validation": "", "Motif rejet": ""}
+                "Date validation": "", "Motif rejet": "", "Validé le": "", "Validé en tant que": ""}
     if statut == "Validée Resp. service":
         return {"Statut": statut, "Visa Resp. service": visa or f"{user['Nom']} (suppléance)",
                 "Date visa Resp. service": as_text(d.get("Date visa Resp. service")) or auj,
-                "Validé par": "", "Date validation": "", "Motif rejet": ""}
+                "Validé par": "", "Date validation": "", "Motif rejet": "", "Validé le": "", "Validé en tant que": ""}
     if statut == "Validée DG":
         return {"Statut": statut, "Visa Resp. service": visa or f"{user['Nom']} (suppléance)",
                 "Date visa Resp. service": as_text(d.get("Date visa Resp. service")) or auj,
-                "Validé par": user["Nom"], "Date validation": auj, "Motif rejet": ""}
+                "Validé par": user["Nom"], "Date validation": auj, "Motif rejet": "", **_trace_validation(user)}
     return {"Statut": "Rejetée", "Motif rejet": f"{motif} — {user['Nom']} (admin)" if motif else ""}
 
 

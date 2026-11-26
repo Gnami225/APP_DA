@@ -211,3 +211,13 @@ def nouvel_id(n: int = 8) -> str:
 
 def maintenant() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def trace_validation(user: dict) -> dict:
+    """Heure exacte et qualité du validateur (DA et BC) : le PDF affiche le cachet en gras « Validé par la Direction
+    générale » seulement quand un membre de la Direction (rôle Direction) valide ; un administrateur valide comme
+    avant."""
+    qualite = ""
+    if user.get("Rôle") == "Direction":
+        qualite = as_text(user.get("Poste")) or "Direction générale"
+    return {"Validé le": maintenant(), "Validé en tant que": qualite}

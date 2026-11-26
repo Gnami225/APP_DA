@@ -174,7 +174,8 @@ def onglet_achats(ctx):
     vues = {"📋 À faire": pilotage.vue_a_faire, "Demandes d'achat (DA)": _vue_da}
     if ctx.user["Rôle"] == "Admin":  # sourcing (recherche web, le plus coûteux) : administrateurs uniquement
         vues["🔎 Sourcing"] = sourcing.vue_sourcing
-    vues.update({"Tableaux comparatifs (TCP)": _vue_tcp, "Bons de commande": _vue_bc})
+    vues.update({"Tableaux comparatifs (TCP)": _vue_tcp, "Bons de commande": _vue_bc,
+                 "📄 Liste des BC": _vue_liste_bc})
     if ctx.user["Rôle"] != "Acheteur":  # acheteur : DA, TCP et BC
         vues.update({"Suivi livraisons": onglet_livraisons, "Fournisseurs": _vue_fournisseurs})
     vues["⭐ Notes fournisseurs"] = sourcing.vue_notes
@@ -730,11 +731,8 @@ def _vue_bc(ctx):
                     "(la DA et le TCP restent sélectionnés).")
         c2.button("Nouveau BC", type="primary", key="bc-new", on_click=_bc_suivant)
         return
-    mode = st.radio("BC", ["Nouveau BC", "Bons de commande émis"], horizontal=True, label_visibility="collapsed",
-                    key="bc-mode")
-    if mode == "Bons de commande émis":
-        _liste_bc(ctx)
-        return
+    st.caption("Nouveau bon de commande. Pour revoir, modifier ou retélécharger les BC déjà émis : onglet "
+               "« 📄 Liste des BC ».")
     st.session_state.pop("bc_prepare", None)
     da = _choix_da(ctx, "bc-da")
     if not da:
@@ -1050,23 +1048,56 @@ def _table_bc(bc: pd.DataFrame) -> pd.DataFrame:
     return v
 
 
-def _liste_bc(ctx):
+def _liste_bc(ctx, key: str = "lbc"):
+    """Liste des BC (tous statuts, y compris en attente de validation) : revoir, télécharger, ZIP de plusieurs BC."""
     if st.session_state.get("lbc_msg"):
         st.success(st.session_state.pop("lbc_msg"))
     bc = ctx.load("BC")
     if not len(bc):
         st.info("Aucun bon de commande.")
         return
-    f = _filtre_bc(ctx, bc, "lbc").head(300)
+    f = _filtre_bc(ctx, bc, key)
+    c1, c2 = st.columns([2, 1])
+    dates = f["Date BC"].map(to_date)
+    if dates.notna().any():
+        per = c1.date_input("Période (date du BC)", value=(dates.min(), dates.max()), format="DD/MM/YYYY",
+                            key=f"{key}-per")
+        if isinstance(per, (list, tuple)) and len(per) == 2:
+            f = f.loc[dates.map(lambda d: d is not None and per[0] <= d <= per[1]).astype(bool)]
+    f = f.head(500)
+    c2.metric("BC affichés", len(f), help=f"Total TTC {fmt_montant(f['Total TTC'].map(to_num).sum())} F")
     v = _table_bc(f)
-    st.dataframe(v[["N° BC", "Date", "N° DA", "Chantier", "Fournisseur", "Total TTC (F)", "Statut", "Acheteur",
-                    "Validé par", "Motif rejet"]], hide_index=True, width="stretch")
-    lab = {as_text(r["ID_BC"]): f"{as_text(r['N° BC'])} · {as_text(r['Fournisseur'])} · {as_text(r['Statut'])}"
-           for _, r in f.iterrows()}
-    sel = st.selectbox("Bon de commande", list(lab), format_func=lab.get, index=None, key="lbc-sel",
-                       placeholder="Choisir un BC")
-    if sel:
-        detail_bc(ctx, f.loc[f["ID_BC"].map(as_text) == sel].iloc[0].to_dict(), "lbc", annuler=True)
+    st.caption("Cliquez sur une ligne pour revoir le BC et le télécharger (même s'il n'est pas encore validé : le "
+               "PDF porte alors la mention « En attente de validation »). Cochez plusieurs lignes pour un ZIP.")
+    ev = st.dataframe(v[["N° BC", "Date", "N° DA", "Chantier", "Fournisseur", "Total TTC (F)", "Statut", "Acheteur",
+                         "Validé par", "Motif rejet"]], hide_index=True, width="stretch", on_select="rerun",
+                      selection_mode="multi-row", key=f"{key}-tab-{len(f)}")
+    rows = list(ev.selection.rows) if ev and ev.selection else []
+    choisis = f.iloc[rows] if rows else f.iloc[0:0]
+    if len(choisis) > 1:
+        import zipfile
+        bl = ctx.load("BC_LIGNES")
+        if st.button(f"📦 Préparer le ZIP des {len(choisis)} BC", key=f"{key}-zipprep"):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                for _, r in choisis.iterrows():
+                    l = bl.loc[bl["ID_BC"].map(as_text) == as_text(r["ID_BC"])].sort_values("N° Ligne")
+                    z.writestr(f"{as_text(r['N° BC'])}{'_ANNULE' if as_text(r['Statut']) == 'Annulé' else ''}.pdf",
+                               pdf_bc(ctx, r.to_dict(), l.to_dict("records")))
+            st.session_state[f"{key}-zip"] = buf.getvalue()
+        if st.session_state.get(f"{key}-zip"):
+            st.download_button(f"Télécharger le ZIP ({len(choisis)} BC)", st.session_state[f"{key}-zip"],
+                               file_name=f"BC_{date.today():%Y%m%d}.zip", mime="application/zip", type="primary",
+                               key=f"{key}-zipdl")
+    else:
+        st.session_state.pop(f"{key}-zip", None)
+    if len(choisis):
+        st.divider()
+        detail_bc(ctx, choisis.iloc[-1].to_dict(), key, annuler=True)
+
+
+def _vue_liste_bc(ctx):
+    _liste_bc(ctx, "lbc")
 
 
 def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
@@ -1225,7 +1256,8 @@ def modifier_bc(ctx, b: dict, l: pd.DataFrame):
                 "Total HT brut": tot["Total HT brut"], "Remise globale %": tot["Remise globale %"],
                 "Remise globale (F)": tot["Remise globale (F)"],
                 "Taux TVA": _taux_entete(gardees, taux), "Modifié le": maintenant(), "Modifié par": ctx.user.get("Nom", ""),
-                **({} if valide else {"Statut": "Émis", "Motif rejet": "", "Validé par": "", "Date validation": ""})})
+                **({} if valide else {"Statut": "Émis", "Motif rejet": "", "Validé par": "", "Date validation": "",
+                                       "Validé le": "", "Validé en tant que": ""})})
             maj_lignes_da(ctx, {as_text(i) for i in v["ID_Ligne_DA"] if as_text(i)})
             maj_statut_tcp(ctx, as_text(b.get("ID_TCP")))
             if valide:
@@ -1497,9 +1529,11 @@ def onglet_validation_bc(ctx):
     if action:
         non_emis = coches.loc[coches["Statut"] != "Émis", "N° BC"].tolist()
         coches = coches.loc[coches["Statut"] == "Émis"]
+        from logic import trace_validation
+        trace = trace_validation(ctx.user) if action == "Validé" else {"Validé le": "", "Validé en tant que": ""}
         changes = {as_text(i): {"Statut": action, "Validé par": ctx.user["Nom"],
                                 "Date validation": date.today().isoformat(),
-                                "Motif rejet": motif.strip() if action == "Rejeté" else ""}
+                                "Motif rejet": motif.strip() if action == "Rejeté" else "", **trace}
                    for i in coches["ID_BC"]}
         if changes:
             ctx.get_store().update_many("BC", "ID_BC", changes)
