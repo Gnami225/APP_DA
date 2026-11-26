@@ -50,11 +50,18 @@ def couverture(ctx) -> tuple[pd.DataFrame, pd.DataFrame]:
     rep = ids_reprise(ctx)
     from schema import LIGNE_BC_RETIREE
     bl = bl.loc[bl["Statut livraison"].map(as_text) != LIGNE_BC_RETIREE]
+    bcs = ctx.load("BC")
+    f_rg = ({as_text(i): 1 - to_num(r) / 100 for i, r in zip(bcs["ID_BC"], bcs["Remise globale %"])}
+            if "Remise globale %" in bcs.columns else {})
     b = pd.DataFrame({"Source": bl["ID_BC"].map(lambda i: "Reprise BC antérieurs" if as_text(i) in rep
                                                 else "Application"),
                       "date": bl["Date BC"].map(to_date), "bc": bl["N° BC"].map(as_text),
                       "Fournisseur": bl["Fournisseur"].map(as_text), "Désignation": bl["Désignation"].map(as_text),
-                      "q": bl["Quantité"].map(to_num), "pu": bl["Prix unitaire HT"].map(to_num)})
+                      "q": bl["Quantité"].map(to_num),
+                      "pu": [to_num(p) * (1 - to_num(r) / 100) * f_rg.get(as_text(i), 1)
+                             for p, r, i in zip(bl["Prix unitaire HT"], bl["Remise %"], bl["ID_BC"])]})
+    from logic import num_bc
+    a = a.loc[~a["bc"].map(num_bc).isin(set(b["bc"].map(num_bc)))]  # BC repris dans l'application : comptés une fois
     d = pd.concat([a, b], ignore_index=True)
     d["montant"] = d["q"] * d["pu"]
     d["Motif"] = np.where(d["date"].isna(), "sans date", np.where(d["montant"] <= 0, "quantité ou prix nul", ""))

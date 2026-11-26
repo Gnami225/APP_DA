@@ -68,8 +68,10 @@ def base_prix(ctx) -> pd.DataFrame:
     f_rg = {as_text(i): 1 - to_num(r) / 100 for i, r in zip(bc["ID_BC"], bc["Remise globale %"])} \
         if "Remise globale %" in bc.columns else {}  # remise globale du BC répartie sur les prix
     bl = bl.loc[bl["ID_BC"].map(as_text).isin(val).astype(bool)]
-    deja = set(a["bc"])
-    bl = bl.loc[~bl["N° BC"].map(as_text).isin(deja).astype(bool)]  # pas de doublon après archivage
+    # un BC validé présent dans l'application (créé ou repris) remplace ses lignes de l'historique importé
+    from logic import num_bc
+    dans_app = set(bl["N° BC"].map(num_bc))
+    a = a.loc[~a["bc"].map(num_bc).isin(dans_app)]
     b = pd.DataFrame({
         "date": bl["Date BC"].map(to_date), "bc": bl["N° BC"].map(as_text), "four": bl["Fournisseur"].map(as_text),
         "code": bl["Code Article"].map(as_text), "des": bl["Désignation"].map(as_text),

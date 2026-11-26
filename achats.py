@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import re
 
@@ -989,13 +989,19 @@ def _enregistre_bc(ctx, e: dict, lignes: list[dict]):
 
 
 def _filtre_bc(ctx, bc: pd.DataFrame, key: str, defaut=None) -> pd.DataFrame:
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     sts = c1.multiselect("Statut", STATUTS_BC, default=defaut, key=f"{key}-st", placeholder="Tous")
-    fo = c2.multiselect("Fournisseur", sorted(set(bc["Fournisseur"].map(as_text)) - {""}), key=f"{key}-fo",
+    noms = ctx.refs()["chantiers"]
+    chs = c2.multiselect("Chantier", sorted(set(bc["Chantier"].map(as_text)) - {""},
+                                            key=lambda c: noms.get(c, c)),
+                         format_func=lambda c: noms.get(c, c), key=f"{key}-ch", placeholder="Tous")
+    fo = c3.multiselect("Fournisseur", sorted(set(bc["Fournisseur"].map(as_text)) - {""}), key=f"{key}-fo",
                         placeholder="Tous")
-    q = c3.text_input("N° BC, N° DA ou chantier", key=f"{key}-q")
+    q = c4.text_input("N° BC, N° DA ou chantier", key=f"{key}-q")
     if sts:
         bc = bc.loc[bc["Statut"].isin(sts)]
+    if chs:
+        bc = bc.loc[bc["Chantier"].map(as_text).isin(chs)]
     if fo:
         bc = bc.loc[bc["Fournisseur"].map(as_text).isin(fo)]
     if q.strip():
@@ -1059,8 +1065,9 @@ def _liste_bc(ctx, key: str = "lbc"):
     f = _filtre_bc(ctx, bc, key)
     c1, c2 = st.columns([2, 1])
     dates = f["Date BC"].map(to_date)
-    if dates.notna().any():
-        per = c1.date_input("Période (date du BC)", value=(dates.min(), dates.max()), format="DD/MM/YYYY",
+    valides = [d for d in dates if d]
+    if valides:
+        per = c1.date_input("Période (date du BC)", value=(min(valides), max(valides)), format="DD/MM/YYYY",
                             key=f"{key}-per")
         if isinstance(per, (list, tuple)) and len(per) == 2:
             f = f.loc[dates.map(lambda d: d is not None and per[0] <= d <= per[1]).astype(bool)]
@@ -1127,10 +1134,11 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
     c1, c2 = st.columns(2)
     c1.download_button("Télécharger / imprimer le BC", pdf_bc(ctx, b, l.to_dict("records")), file_name=nom,
                        mime="application/pdf", type="primary", key=f"{key}-pdf")
-    if annuler and ctx.user.get("Rôle") in ROLES_ACHATS and (
-            statut in ("Émis", "Rejeté") or (statut == "Validé" and ctx.user.get("Rôle") == "Admin")):
+    if annuler and ctx.user.get("Rôle") == "Admin" and statut in ("Émis", "Rejeté", "Validé"):
         modifier_bc(ctx, b, l)
-    if annuler and statut in ("Émis", "Rejeté"):
+    if annuler and ctx.user.get("Rôle") != "Admin" and statut in ("Émis", "Rejeté", "Validé"):
+        c2.caption("Modification et annulation des BC : administrateur uniquement.")
+    if annuler and ctx.user.get("Rôle") == "Admin" and statut in ("Émis", "Rejeté"):
         if c2.button("Annuler ce BC (libère les quantités de la DA)", key=f"{key}-ann"):
             ctx.get_store().update("BC", "ID_BC", as_text(b["ID_BC"]), {"Statut": "Annulé"})
             maj_lignes_da(ctx, {as_text(x) for x in l["ID_Ligne_DA"] if as_text(x)})
@@ -1772,14 +1780,30 @@ def importer_bc(ctx, fichier) -> str:
     cols_bc, cols_bl = TABLES["BC"], TABLES["BC_LIGNES"]
     rows_bl = [{c: r.get(c, "") for c in cols_bl} for r in bl.to_dict("records")]
     _coder_lignes(rows_bl, index)
-    store.append("BC", [{c: r.get(c, "") for c in cols_bc} for r in bc.to_dict("records")])
+    rows_bc = [{c: r.get(c, "") for c in cols_bc} for r in bc.to_dict("records")]
+    for i in range(0, len(rows_bc), 500):
+        store.append("BC", rows_bc[i:i + 500])
     for i in range(0, len(rows_bl), 500):
         store.append("BC_LIGNES", rows_bl[i:i + 500])
+    # livraisons du suivi (sans entrée en stock : marchandise déjà consommée / sortie du périmètre magasin)
+    n_liv = 0
+    if "LIVRAISONS" in xl:
+        lv = xl["LIVRAISONS"].astype(object).where(xl["LIVRAISONS"].notna(), "")
+        lv = lv.loc[lv["N° BC"].map(as_text).isin(set(bc["N° BC"].map(as_text)))]
+        ch_bc = dict(zip(bc["N° BC"].map(as_text), bc["Chantier"].map(as_text)))
+        lv["Chantier"] = lv["N° BC"].map(lambda n: ch_bc.get(as_text(n), ""))
+        rows_lv = [{c: r.get(c, "") for c in TABLES["LIVRAISONS"]} for r in lv.to_dict("records")]
+        for i in range(0, len(rows_lv), 500):
+            store.append("LIVRAISONS", rows_lv[i:i + 500])
+        n_liv = len(rows_lv)
     _ajoute_fournisseurs(ctx, [as_text(f) for f in bc["Fournisseur"] if "PRÉCISER" not in as_text(f)])
     # numérotation : le prochain BC de l'application vient après les BC repris
     p = params(ctx)
-    nums = [int(m.group(1)) for n in bc["N° BC"].map(as_text) if (m := re.search(r"(\d+)$", n))]
-    if nums and max(nums) + 1 > int(to_num(p.get("Prochain N° BC")) or 0):
+    recent = date.today() - timedelta(days=120)  # numéros récents seulement (un n° hors série ne décale rien)
+    nums = [int(m.group(1)) for n, d in zip(bc["N° BC"].map(as_text), bc["Date BC"].map(to_date))
+            if d and d >= recent and (m := re.fullmatch(r"BC-(\d{6})", n))]
+    releve = bool(nums) and max(nums) + 1 > int(to_num(p.get("Prochain N° BC")) or 0)
+    if releve:
         store.update("PARAMETRES", "Paramètre", "Prochain N° BC", {"Valeur": str(max(nums) + 1)})
     # filet de sécurité : une ligne encore sans code part dans « Articles à cataloguer »
     hors = [r for r in rows_bl if not as_text(r.get("Code Article"))]
@@ -1791,11 +1815,13 @@ def importer_bc(ctx, fichier) -> str:
             "ID_DA": "", "ID_Ligne": catalogage.PREFIXE_BC + as_text(r["ID_LigneBC"]), "Statut": "À analyser"}
             for r in hors])
     ctx.refresh()
-    return (f"{len(bc)} BC importé(s) dans l'onglet BC ({len(rows_bl)} lignes dans BC_LIGNES). Catalogue : "
-            f"{n_art} nouvel(s) article(s) créé(s)" + (f", {len(hors)} ligne(s) restée(s) sans code" if hors else
-                                                       ", toutes les lignes ont un code article") + "."
-            + (f" Déjà présents (non réimportés) : {', '.join(deja)}." if deja else "")
-            + (f" Prochain N° BC : {max(nums) + 1}." if nums else ""))
+    return (f"{len(bc)} BC importé(s) dans l'onglet BC ({len(rows_bl)} lignes dans BC_LIGNES"
+            + (f", {n_liv} livraison(s) dans LIVRAISONS" if n_liv else "") + "). Catalogue : "
+            f"{n_art} nouvel(s) article(s) créé(s)" + (f", {len(hors)} ligne(s) restée(s) sans code (à cataloguer)"
+                                                       if hors else ", toutes les lignes ont un code article") + "."
+            + (f" Déjà présents (non réimportés) : {len(deja)} BC"
+               + (f" ({', '.join(deja[:8])}{'…' if len(deja) > 8 else ''})" if deja else "") + "." if deja else "")
+            + (f" Prochain N° BC : {max(nums) + 1}." if releve else ""))
 
 
 def onglet_archivage(ctx):

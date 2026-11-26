@@ -213,6 +213,14 @@ def maintenant() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def num_bc(v) -> str:
+    """Numéro de BC comparable entre sources : « BC 5357 », « 5357 », « BC-005357 » -> « BC-005357 » ; autre
+    libellé (BC11 ZIMBABWE, CAISSE…) inchangé."""
+    t = as_text(v).upper()
+    m = re.fullmatch(r"(?:BC)?\s*-?\s*0*(\d{3,6})", t)
+    return f"BC-{int(m.group(1)):06d}" if m else t
+
+
 def trace_validation(user: dict) -> dict:
     """Heure exacte et qualité du validateur (DA et BC) : le PDF affiche le cachet en gras « Validé par la Direction
     générale » seulement quand un membre de la Direction (rôle Direction) valide ; un administrateur valide comme

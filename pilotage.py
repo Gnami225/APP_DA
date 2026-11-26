@@ -43,6 +43,9 @@ def a_faire(ctx) -> dict[str, pd.DataFrame]:
             "Total TTC (F)": e["Total TTC"].map(fmt_montant)}).sort_values("Attente (j)", ascending=False)
         v = bc.loc[(bc["Statut"].map(as_text) == "Validé") & (bc["Livraison"] != "Livré")]
         v = v.loc[(v["Âge (j)"].fillna(0) >= d_liv) | (v["Livraison"] == "Partiel")]
+        # les vieux reliquats (BC repris de l'historique…) restent dans « Suivi livraisons », pas dans les relances
+        fen = to_num(p.get("Relances livraison : BC de moins de (jours)")) or 120
+        v = v.loc[v["Âge (j)"].fillna(0) <= fen]
         out["Livraisons à relancer"] = pd.DataFrame({
             "_id": v["_id"], "N° BC": v["N° BC"].map(as_text), "Fournisseur": v["Fournisseur"].map(as_text),
             "Chantier": v["Chantier"].map(lambda c: r.get(as_text(c), as_text(c))),

@@ -235,3 +235,54 @@ article » (5 par défaut).
   affichée à l'émission, en modification, sur le PDF (Total HT brut / Remise globale / Total HT net / TVA / TTC) ;
   lue sur la proforma ou dictée à l'IA ; prix nets et statistiques tiennent compte de la remise.
   Colonnes BC ajoutées : Total HT brut, Remise globale %, Remise globale (F).
+
+## TCP intelligent (25/11/2026)
+Nouveau fichier `tcp_ia.py` (écran « Nouveau TCP ») ; `achats.py`, `ia.py`, `schema.py`, `sourcing.py`, `pdf.py` modifiés.
+- **Import de plusieurs devis** (photos / PDF) : une lecture IA par devis → fournisseur reconnu (rapproché de la base),
+  délai, conditions, crédit, remise globale, transport, validité, prix nets, marque, **conformité** et **qualité** par
+  article. Contrôles : quantité / unité différentes, devis expiré, lignes hors demande, même devis importé deux fois.
+- **Langage naturel** : « SOCOCE : délai 2 jours et 5 % de remise », « KANIS ne fait pas le câble »… ; un fait de
+  terrain dicté va dans la zone « Situation terrain ».
+- **Recommandation dynamique** : profils (Équilibré, Moins cher, Urgence chantier — par défaut si DA urgente —,
+  Qualité / conformité, Moins de fournisseurs) et poids ajustables sur 7 critères : prix, délai, conformité, qualité,
+  fiabilité (note fournisseur), paiement, regroupement. Une offre non conforme n'est pas recommandée s'il existe une
+  offre conforme. Bouton « 🤖 Recommandation IA » : tient compte de la situation terrain et de l'urgence.
+- **Choix final par l'acheteur**, article par article (✋ modifié) ou d'un clic (suivre la recommandation, tout au
+  moins-disant, tout chez X). Motif **obligatoire** si des articles ne vont pas au moins-disant (bouton « 🤖 Rédiger
+  le motif »).
+- Enregistré : TCP (+ Profil, Situation terrain, Recommandation IA, Recommandation suivie), TCP_OFFRES (+ Marque,
+  Conformité, Qualité, Libellé devis, Recommandé), DOCUMENTS (devis, + ID_TCP / N° TCP, fichier dans Drive si
+  configuré). Colonnes ajoutées automatiquement. Le PDF du TCP affiche le profil et la recommandation suivie.
+- Sans clé IA : saisie manuelle + recommandation calculée sur les critères (tout fonctionne, sans import ni phrase).
+
+## Fiches de stock lues par l'IA + statistiques stocks et couverture (25/11/2026)
+Nouveaux fichiers `fiches_stock.py`, `stats_stock.py` ; `magasin.py`, `stats.py`, `ia.py`, `schema.py` modifiés.
+- **Magasin › 📄 Fiches (IA)** (magasinier ; admin via Stocks › Agir sur un magasin) : photos / PDF / Excel des
+  fiches de tenue de stock, fiches de flux / bons, fiches d'inventaire, plusieurs à la fois. L'IA lit chaque ligne
+  (date, n° de bon, engin, code parc, immatriculation, quantité, solde) ; l'application rapproche l'article du
+  catalogue et l'engin du parc, **recalcule les soldes** et les compare à ceux de la fiche (❌ à vérifier), repère les
+  mouvements déjà enregistrés et les fiches déjà importées. Tableau modifiable, rien n'est écrit avant validation.
+- Mode : **Courant** (met le stock à jour) ou **Historique** (statistiques seulement, colonne Historique = Oui).
+  Automatique : article jamais suivi → le report de la fiche devient le stock initial ; article suivi → après le
+  dernier inventaire = courant, avant = historique. Fiche d'inventaire → ajustements.
+- STOCK_MOUVEMENTS : colonnes N° bon, Historique, Source, ID_Document, Solde fiche (ajoutées automatiquement) ;
+  fiches archivées dans DOCUMENTS (type « Fiche de stock », Drive si configuré).
+- **Statistiques** : panneau « 🧾 Couverture des données » (période, BC, lignes, montant par source — historique
+  importé, reprise de BC, application —, mois sans achat, trous entre sources, lignes non comptées) ; filtre Source
+  avec « Reprise BC antérieurs » ; nouvelle section **📦 Stocks & consommations** (consommation valorisée par mois /
+  magasin / famille / engin / article, carburant par engin et par mois, achats vs consommation par chantier, articles
+  dormants, écarts d'inventaire), historique des fiches compris.
+
+## Reprise complète de l'historique des BC + droits BC (26/11/2026)
+- `REPRISE_HISTORIQUE_COMPLETE.xlsx` : tous les BC du suivi commandes / livraisons (janv. 2025 → oct. 2026) + BC de
+  novembre hors application, au format de l'application (BC, BC_LIGNES, LIVRAISONS) ; onglet CONTRÔLES (lignes
+  exclues, ajoutées, corrigées, à vérifier). Import : Administration › Paramètres › Reprise de BC antérieurs ;
+  réimport sans doublon. Les livraisons reprises ne créent pas d'entrée en stock.
+- Statistiques et prix : un BC présent dans l'application (créé ou repris) remplace ses lignes de PRIX_HISTORIQUE
+  (numéros comparés quel que soit le format : « BC 5357 » = « BC-005357 ») → aucun double compte.
+- Le prochain N° de BC n'est relevé que d'après les BC repris de moins de 120 jours (un numéro hors série ne décale
+  pas la numérotation).
+- « Livraisons à relancer » : BC de moins de 120 jours (paramètre « Relances livraison : BC de moins de (jours) ») ;
+  les reliquats plus anciens restent visibles dans Suivi livraisons.
+- Seul l'administrateur modifie ou annule un BC (tous statuts) ; l'acheteur voit et retélécharge.
+- Filtre Chantier dans Validation BC et Liste des BC.

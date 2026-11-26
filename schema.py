@@ -124,6 +124,7 @@ PARAMETRES_DEFAUT = {  # valeurs initiales, modifiables dans Administration > Pa
     "Catalogage automatique IA": "Oui",
     "Délai traitement DA (jours)": "3",
     "Délai livraison attendu (jours)": "15",
+    "Relances livraison : BC de moins de (jours)": "120",
     "Sourcing : recherches web max par article": "3",
     "Sourcing : validité des résultats (jours)": "60",
     "Sourcing : articles max par lancement": "10",

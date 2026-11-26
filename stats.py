@@ -42,7 +42,10 @@ def _lignes(ctx) -> pd.DataFrame:
     f_rg = {as_text(i): 1 - to_num(r) / 100 for i, r in zip(bc["ID_BC"], bc.get("Remise globale %", pd.Series(
         [0] * len(bc), index=bc.index)))}
     bl = bl.loc[bl["Statut livraison"].map(as_text) != LIGNE_BC_RETIREE]
-    bl = bl.loc[~bl["N° BC"].map(as_text).isin(set(a["bc"]))]
+    # un BC présent dans l'application (créé ou repris) remplace ses lignes de l'historique importé
+    from logic import num_bc
+    dans_app = set(bc["N° BC"].map(num_bc))
+    a = a.loc[~a["bc"].map(num_bc).isin(dans_app)]
     b = pd.DataFrame({
         "date": bl["Date BC"].map(to_date), "bc": bl["N° BC"].map(as_text), "four": bl["Fournisseur"].map(as_text),
         "chantier": bl["Chantier"].map(lambda c: noms_ch.get(as_text(c), as_text(c))),
@@ -276,28 +279,40 @@ def _options(df: pd.DataFrame, col: str, m: pd.Series) -> list[str]:
 
 
 def _filtres(df: pd.DataFrame) -> pd.DataFrame:
-    # ---- slicer de période (mois de début -> mois de fin) + raccourcis
-    mois = sorted(df["mois"].unique())
-    def depuis(n: int) -> tuple[str, str]:  # n mois calendaires jusqu'au dernier mois avec des achats
-        debut = (pd.Period(mois[-1], "M") - (n - 1)).strftime("%Y-%m")
-        return next((x for x in mois if x >= debut), mois[-1]), mois[-1]
+    # ---- période : curseur de date à date (au jour près) + saisie directe « Du / Au » + raccourcis
+    from datetime import timedelta
+    jours = df["date"].dt.date
+    dmin, dmax = jours.min(), jours.max()
+    if dmax - dmin < timedelta(days=1):
+        dmax = dmin + timedelta(days=1)
 
-    raccourcis = {"Tout": (mois[0], mois[-1]), "12 derniers mois": depuis(12), "6 derniers mois": depuis(6),
-                  "3 derniers mois": depuis(3),
-                  "Année en cours": (next((x for x in mois if x.startswith(mois[-1][:4])), mois[0]), mois[-1])}
-    per = st.session_state.get("sta-per")
-    if not (isinstance(per, (tuple, list)) and len(per) == 2 and per[0] in mois and per[1] in mois):
-        st.session_state["sta-per"] = (mois[0], mois[-1])
+    def depuis(n: int):  # n mois glissants jusqu'à la dernière date d'achat
+        return max(dmin, (pd.Timestamp(dmax) - pd.DateOffset(months=n) + pd.Timedelta(days=1)).date()), dmax
+
+    raccourcis = {"Tout": (dmin, dmax), "12 derniers mois": depuis(12), "6 derniers mois": depuis(6),
+                  "3 derniers mois": depuis(3), "Mois en cours": (max(dmin, dmax.replace(day=1)), dmax),
+                  "Année en cours": (max(dmin, dmax.replace(month=1, day=1)), dmax)}
+    per = st.session_state.get("sta-dates")
+    if not (isinstance(per, (tuple, list)) and len(per) == 2 and dmin <= per[0] <= per[1] <= dmax):
+        st.session_state["sta-dates"] = (dmin, dmax)
+
+    def _du_au():  # saisie directe -> curseur
+        d1, d2 = st.session_state.get("sta-du"), st.session_state.get("sta-au")
+        if d1 and d2:
+            d1, d2 = max(dmin, min(d1, d2)), min(dmax, max(d1, d2))
+            st.session_state["sta-dates"] = (d1, d2)
     r = st.segmented_control("Raccourci de période", list(raccourcis), key="sta-racc", label_visibility="collapsed")
     if r and r != st.session_state.get("_sta_racc_applique"):  # nouveau raccourci : il positionne le curseur
-        st.session_state["sta-per"] = raccourcis[r]
+        st.session_state["sta-dates"] = raccourcis[r]
     st.session_state["_sta_racc_applique"] = r
-    if len(mois) > 1:
-        deb, fin = st.select_slider("Période (mois)", options=mois, key="sta-per",
-                                    format_func=lambda m: f"{m[5:]}/{m[:4]}")
-    else:
-        deb = fin = mois[0]
-    m = (df["mois"] >= deb) & (df["mois"] <= fin)
+    c0, c01, c02 = st.columns([4, 1, 1])
+    deb_d, fin_d = c0.slider("Période (de date à date)", min_value=dmin, max_value=dmax, key="sta-dates",
+                             format="DD/MM/YYYY", step=timedelta(days=1))
+    st.session_state["sta-du"], st.session_state["sta-au"] = deb_d, fin_d
+    c01.date_input("Du", min_value=dmin, max_value=dmax, key="sta-du", format="DD/MM/YYYY", on_change=_du_au)
+    c02.date_input("Au", min_value=dmin, max_value=dmax, key="sta-au", format="DD/MM/YYYY", on_change=_du_au)
+    st.caption(f"Données disponibles du {dmin:%d/%m/%Y} au {dmax:%d/%m/%Y}")
+    m = (jours >= deb_d) & (jours <= fin_d)
     # ---- filtres en cascade (chantier → famille → fournisseur → désignation → référence) : chaque liste ne
     # propose que les valeurs possibles avec les choix des filtres précédents ; un choix devenu impossible est retiré
     cols = {"sta-ch": "chantier", "sta-fa": "famille", "sta-fo": "four", "sta-de": "des", "sta-re": "ref"}
@@ -336,7 +351,7 @@ def _filtres(df: pd.DataFrame) -> pd.DataFrame:
     actifs = [f"{len(v)} {n}" for v, n in ((sel["sta-ch"], "chantier(s)"), (sel["sta-fa"], "famille(s)"),
                                             (sel["sta-fo"], "fournisseur(s)"), (sel["sta-de"], "désignation(s)"),
                                             (sel["sta-re"], "référence(s)")) if v]
-    st.caption(f"Sélection : {deb[5:]}/{deb[:4]} → {fin[5:]}/{fin[:4]}"
+    st.caption(f"Sélection : du {deb_d:%d/%m/%Y} au {fin_d:%d/%m/%Y}"
                + (" · " + " · ".join(actifs) if actifs else " · aucun autre filtre")
                + f" · {int(m.sum())} lignes d'achat")
     return df.loc[m]
