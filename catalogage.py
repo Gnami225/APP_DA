@@ -151,41 +151,68 @@ def _table_decisions(ctx, attente: pd.DataFrame, art: pd.DataFrame):
     version = st.session_state.get("cat_v", 0)
     from schema import COLISAGES
     import ia
+    cles = [f"{d}|{r}" for d, r in zip(v["Désignation saisie"], v["Référence saisie"])]
+    memo = st.session_state.setdefault("cat-ia-props", {})  # « DÉSIGNATION|RÉFÉRENCE » -> proposition IA
     if ia.disponible():
-        cle = f"cat-ia-{version}"
-        if st.button("✨ Proposer les décisions avec l'IA", key=f"{cle}-go",
-                     help="L'IA compare chaque article au catalogue et propose Rattacher / Intégrer (à vérifier)"):
-            with st.spinner("L'IA analyse les articles hors catalogue…"):
-                try:
-                    st.session_state[cle] = ia.proposer_catalogage(
-                        [{"designation": d, "reference": r} for d, r in zip(v["Désignation saisie"],
-                                                                            v["Référence saisie"])][:60],
-                        art, familles, ctx.version())
-                except ia.IAErreur as e:
-                    st.error(str(e))
-        props = st.session_state.get(cle) or []
-        for d in props:
-            i = d.get("index")
-            if not isinstance(i, int) or not 0 <= i < len(v):
-                continue
-            if d.get("decision") == "Rattacher" and as_text(d.get("code")):
-                v.iat[i, v.columns.get_loc("Décision")] = "Rattacher"
-                v.iat[i, v.columns.get_loc("Code à rattacher")] = as_text(d["code"]).upper()
-            elif d.get("decision") == "Intégrer":
-                v.iat[i, v.columns.get_loc("Décision")] = "Intégrer"
-                for c, ch in (("Désignation retenue", "designation"), ("Référence retenue", "reference")):
-                    if as_text(d.get(ch)):
-                        v.iat[i, v.columns.get_loc(c)] = as_text(d[ch]).upper()
-                if as_text(d.get("famille")) in familles:
-                    v.iat[i, v.columns.get_loc("Famille")] = as_text(d["famille"])
-        if props:
-            v.insert(v.columns.get_loc("Décision"), "Avis IA",
-                     [next((as_text(d.get("justification")) for d in props if d.get("index") == i), "")
-                      for i in range(len(v))])
-            st.caption("Propositions de l'IA pré-remplies : vérifiez-les avant d'appliquer.")
-        version = f"{version}-{len(props)}"
+        restants = [i for i, k in enumerate(cles) if k not in memo]
+        c1, c2 = st.columns([2, 3])
+        go = c1.button("✨ Proposer les décisions avec l'IA", key="cat-ia-go", type="primary",
+                       disabled=not restants,
+                       help="L'IA compare chaque article au catalogue et pré-remplit Décision, Famille, Code (à vérifier)")
+        c2.caption(f"{len(restants)} article(s) sans proposition IA" + (" — traités par 60 à chaque clic."
+                                                                        if len(restants) > 60 else "."))
+        if go:
+            choix = restants[:60]
+            barre = st.progress(0.0, text="L'IA analyse les articles hors catalogue…")
+            try:
+                props = ia.proposer_catalogage(
+                    [{"designation": v.iat[i, 1], "reference": v.iat[i, 2]} for i in choix], art, familles,
+                    ctx.version(), progression=lambda n, t: barre.progress(n / t, text=f"Analyse IA : {n}/{t}…"))
+                for d in props:
+                    memo[cles[choix[d["index"]]]] = d
+                st.session_state.cat_msg = (f"L'IA a proposé une décision pour {len(props)} article(s) sur "
+                                            f"{len(choix)}. Vérifiez la colonne Décision puis cliquez sur "
+                                            "« Appliquer les décisions ».")
+                if not props:
+                    st.session_state.cat_msg = None
+                    st.session_state["cat-ia-err"] = ("L'IA n'a renvoyé aucune proposition. Réessayez ; si cela "
+                                                      "persiste, décidez à la main.")
+            except ia.IAErreur as e:
+                st.session_state["cat-ia-err"] = str(e)
+            st.session_state.cat_v = version + 1
+            st.rerun()
+        if st.session_state.get("cat-ia-err"):
+            st.error(st.session_state.pop("cat-ia-err"))
+    codes = set(art["Code Article"].map(as_text))
+    avis, n_pre = [], 0
+    for i, k in enumerate(cles):
+        d = memo.get(k)
+        avis.append("")
+        if not d:
+            continue
+        conf = as_text(d.get("confiance"))
+        avis[i] = f"{d.get('decision', '')} ({conf}) : {as_text(d.get('justification'))}".strip(" :")
+        code = as_text(d.get("code")).upper()
+        if d.get("decision") == "Rattacher" and code in codes:
+            v.iat[i, v.columns.get_loc("Décision")] = "Rattacher"
+            v.iat[i, v.columns.get_loc("Code à rattacher")] = code
+            n_pre += 1
+        elif d.get("decision") == "Rattacher":
+            avis[i] += " — code proposé introuvable, à vérifier"
+        elif d.get("decision") == "Intégrer":
+            v.iat[i, v.columns.get_loc("Décision")] = "Intégrer"
+            for c, ch in (("Désignation retenue", "designation"), ("Référence retenue", "reference")):
+                if as_text(d.get(ch)):
+                    v.iat[i, v.columns.get_loc(c)] = as_text(d[ch]).upper()
+            if as_text(d.get("famille")) in familles:
+                v.iat[i, v.columns.get_loc("Famille")] = as_text(d["famille"])
+            n_pre += 1
+    if any(avis):
+        v.insert(v.columns.get_loc("Décision"), "Avis IA", avis)
+        st.caption(f"{n_pre} décision(s) pré-remplie(s) par l'IA : vérifiez-les avant d'appliquer "
+                   "(confiance « faible » ou « moyenne » = à regarder de près).")
     ed = st.data_editor(
-        v, hide_index=True, width="stretch", key=f"cat-ed-{version}",
+        v, hide_index=True, width="stretch", key=f"cat-ed-{version}-{len(memo)}",
         disabled=["Désignation saisie", "Référence saisie", "Demandes", "DA / BC", "Demandeurs", "Proposition IA (auto)",
                   "Article proche du catalogue", "Avis IA"],
         column_config={

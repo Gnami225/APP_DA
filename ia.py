@@ -794,17 +794,33 @@ _OUTIL_CATALOGUE = {
         "required": ["index", "decision", "confiance"]}}}, "required": ["decisions"]}}
 
 
-def proposer_catalogage(items: list[dict], art: pd.DataFrame, familles: list[str], version=0) -> list[dict]:
-    """items : [{désignation, référence}] -> décisions (Rattacher à un code existant ou Intégrer)."""
-    demande = [{"index": i, "designation_saisie": it["designation"], "reference_saisie": it["reference"],
-                "candidats": candidats(art, f"{it['designation']} {it['reference']}", 8, version)}
-               for i, it in enumerate(items)]
-    r = structure(CONTEXTE_PWC + " Tu standardises le catalogue articles : DÉSIGNATION = type d'article sans "
-                  "dimension (ex. PNEU, FILTRE A GASOIL, BETON PRET A L'EMPLOI) ; RÉFÉRENCE = variante (dimension, "
-                  "norme, référence constructeur). Rattacher seulement si un candidat est exactement le même article ; "
-                  "sinon Intégrer avec désignation et référence standardisées en MAJUSCULES et une famille de la liste.",
-                  json.dumps({"articles": demande, "familles": familles}, ensure_ascii=False), _OUTIL_CATALOGUE)
-    return r.get("decisions", [])
+def proposer_catalogage(items: list[dict], art: pd.DataFrame, familles: list[str], version=0,
+                        lot: int = 12, progression=None) -> list[dict]:
+    """items : [{désignation, référence}] -> décisions (Rattacher à un code existant ou Intégrer).
+    Traité par lots (une réponse trop longue serait coupée et ne renverrait rien) ; « index » = position dans items."""
+    systeme = (CONTEXTE_PWC + " Tu standardises le catalogue articles : DÉSIGNATION = type d'article sans "
+               "dimension (ex. PNEU, FILTRE A GASOIL, BETON PRET A L'EMPLOI) ; RÉFÉRENCE = variante (dimension, "
+               "norme, référence constructeur). Rattacher seulement si un candidat est exactement le même article "
+               "(et donner son code) ; sinon Intégrer avec désignation et référence standardisées en MAJUSCULES et "
+               "une famille de la liste. Donne une décision pour CHAQUE article, justification en 10 mots maximum.")
+    sortie = []
+    for debut in range(0, len(items), lot):
+        part = items[debut:debut + lot]
+        demande = [{"index": i, "designation_saisie": it["designation"], "reference_saisie": it["reference"],
+                    "candidats": candidats(art, f"{it['designation']} {it['reference']}", 6, version)}
+                   for i, it in enumerate(part)]
+        r = structure(systeme, json.dumps({"articles": demande, "familles": familles}, ensure_ascii=False),
+                      _OUTIL_CATALOGUE)
+        for d in (r.get("decisions") or []) if isinstance(r, dict) else []:
+            try:
+                i = int(d.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < len(part):
+                sortie.append({**d, "index": debut + i})
+        if progression:
+            progression(min(debut + lot, len(items)), len(items))
+    return sortie
 
 
 # =========================================================================== 4. rédaction
