@@ -233,6 +233,11 @@ def _vue_da(ctx):
         st.dataframe(l[["N° Ligne", "Désignation", "Référence", "Code_Parc", "Colisage", "Qté DA",
                         "Qté commandée", "Reste à commander", "BC", "Statut ligne"]],
                      hide_index=True, width="stretch")
+        if ctx.user.get("Rôle") == "Admin" and hasattr(ctx, "modifier_da"):
+            da_all = ctx.load("DA")
+            d = da_all.loc[da_all["ID_DA"].map(as_text) == id_da]
+            if len(d):
+                ctx.modifier_da(d.iloc[0].to_dict())
         import dossier
         dossier.vue_dossier(ctx, id_da, "ach")
 
@@ -1134,11 +1139,12 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
     c1, c2 = st.columns(2)
     c1.download_button("Télécharger / imprimer le BC", pdf_bc(ctx, b, l.to_dict("records")), file_name=nom,
                        mime="application/pdf", type="primary", key=f"{key}-pdf")
-    if annuler and ctx.user.get("Rôle") == "Admin" and statut in ("Émis", "Rejeté", "Validé"):
-        modifier_bc(ctx, b, l)
-    if annuler and ctx.user.get("Rôle") != "Admin" and statut in ("Émis", "Rejeté", "Validé"):
+    admin = ctx.user.get("Rôle") == "Admin"
+    if admin and statut in ("Émis", "Rejeté", "Validé"):  # l'admin modifie tout BC, quel que soit l'émetteur
+        modifier_bc(ctx, b, l, suffixe=f"-{key}")
+    elif not admin and statut in ("Émis", "Rejeté", "Validé"):
         c2.caption("Modification et annulation des BC : administrateur uniquement.")
-    if annuler and ctx.user.get("Rôle") == "Admin" and statut in ("Émis", "Rejeté"):
+    if admin and statut in ("Émis", "Rejeté"):
         if c2.button("Annuler ce BC (libère les quantités de la DA)", key=f"{key}-ann"):
             ctx.get_store().update("BC", "ID_BC", as_text(b["ID_BC"]), {"Statut": "Annulé"})
             maj_lignes_da(ctx, {as_text(x) for x in l["ID_Ligne_DA"] if as_text(x)})
@@ -1147,7 +1153,7 @@ def detail_bc(ctx, b: dict, key: str, annuler: bool = False):
             st.rerun()
 
 
-def modifier_bc(ctx, b: dict, l: pd.DataFrame):
+def modifier_bc(ctx, b: dict, l: pd.DataFrame, suffixe: str = ""):
     """Modification d'un BC tant qu'il n'est pas validé (Émis ou Rejeté) : quantités, prix, remises, TVA,
     codes parc, lignes retirées, conditions, magasin, observations. Un BC rejeté repart en validation."""
     id_bc, rejete = as_text(b["ID_BC"]), as_text(b["Statut"]) == "Rejeté"
@@ -1163,9 +1169,9 @@ def modifier_bc(ctx, b: dict, l: pd.DataFrame):
         cond_act = as_text(b["Condition règlement"])
         opts = conds if cond_act in conds or not cond_act else conds + [cond_act]
         cond = c1.selectbox("Conditions de règlement", opts, index=opts.index(cond_act) if cond_act in opts else None,
-                            accept_new_options=True, key=f"mbc-cond-{id_bc}")
-        magasin = c2.text_input("Magasin", value=as_text(b.get("Magasin")), key=f"mbc-mag-{id_bc}")
-        obs = st.text_input("Observations", value=as_text(b.get("Observations")), key=f"mbc-obs-{id_bc}")
+                            accept_new_options=True, key=f"mbc-cond-{id_bc}{suffixe}")
+        magasin = c2.text_input("Magasin", value=as_text(b.get("Magasin")), key=f"mbc-mag-{id_bc}{suffixe}")
+        obs = st.text_input("Observations", value=as_text(b.get("Observations")), key=f"mbc-obs-{id_bc}{suffixe}")
 
         # quantité maximale par ligne de DA : quantité DA - commandé dans les autres BC actifs
         bc_all, bl_all = ctx.load("BC"), ctx.load("BC_LIGNES")
@@ -1185,7 +1191,7 @@ def modifier_bc(ctx, b: dict, l: pd.DataFrame):
         st.caption("Modifiez le tableau. Pour retirer un article : cochez la ligne puis 🗑 (ou quantité 0). "
                    "« Max DA » = reste de la DA non commandé dans les autres BC.")
         ed = st.data_editor(
-            v, hide_index=True, width="stretch", key=f"mbc-ed-{id_bc}", num_rows="delete",
+            v, hide_index=True, width="stretch", key=f"mbc-ed-{id_bc}{suffixe}", num_rows="delete",
             disabled=["Désignation", "Référence", "Max DA"],
             column_config={"ID_LigneBC": None, "ID_Ligne_DA": None, "Code Article": None,
                            "Unité": st.column_config.SelectboxColumn(options=sorted(set(COLISAGES) | set(v["Unité"]))),
@@ -1199,7 +1205,7 @@ def modifier_bc(ctx, b: dict, l: pd.DataFrame):
         gardees = ed.loc[ed["Quantité"].map(to_num) > 0].to_dict("records")
         _controle_bc(ctx, gardees)
         taux = to_num(p.get("Taux TVA (%)"))
-        rg = _remise_globale(f"mbc-rg-{id_bc}", totaux(gardees, taux)["Total HT brut"],
+        rg = _remise_globale(f"mbc-rg-{id_bc}{suffixe}", totaux(gardees, taux)["Total HT brut"],
                              to_num(b.get("Remise globale %")))
         tot = totaux(gardees, taux, remise_globale=rg)
         _afficher_totaux(tot, to_num(b["Total HT"]))
@@ -1208,9 +1214,9 @@ def modifier_bc(ctx, b: dict, l: pd.DataFrame):
         ok_dep = True
         if depasse:
             st.warning("Quantité supérieure au reste de la DA pour : " + ", ".join(depasse))
-            ok_dep = st.checkbox("Je confirme le dépassement (justifier dans Observations)", key=f"mbc-dep-{id_bc}")
+            ok_dep = st.checkbox("Je confirme le dépassement (justifier dans Observations)", key=f"mbc-dep-{id_bc}{suffixe}")
         libelle = "Renvoyer le BC corrigé en validation" if rejete else "Enregistrer les modifications du BC"
-        if not st.button(libelle, type="primary", key=f"mbc-go-{id_bc}"):
+        if not st.button(libelle, type="primary", key=f"mbc-go-{id_bc}{suffixe}"):
             return
         erreurs = []
         if not gardees:

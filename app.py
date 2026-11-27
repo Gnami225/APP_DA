@@ -917,11 +917,12 @@ def onglet_mes_da(user: dict):
 MODIFIABLES = ("Émise", "Validée Resp. service", "Rejetée")  # la DA n'est pas encore validée par la DG
 
 
-def modifier_da(d: dict, user: dict, admin: bool = False):
+def modifier_da(d: dict, user: dict, admin: bool = False, suffixe: str = ""):
     """Le demandeur modifie sa DA tant que la DG ne l'a pas validée : quantités, colisages, codes parc, usages,
     articles retirés ou ajoutés, en-tête. Une DA déjà visée repart chez le responsable de service.
     admin=True : l'administrateur modifie n'importe quelle DA, son statut ne change pas."""
     id_da, statut = as_text(d["ID_DA"]), as_text(d["Statut"])
+    cle = id_da + suffixe  # clés des widgets : la même DA peut être ouverte dans deux onglets
     rejet = statut == "Rejetée" and not admin
     titre = ("✏️ Modifier la DA (admin)" if admin else
              "✏️ Corriger et renvoyer la DA" if rejet else "✏️ Modifier la DA")
@@ -942,27 +943,27 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
             if as_text(d["Chantier"]) not in chs:
                 chs.append(as_text(d["Chantier"]))
             entete["Chantier"] = a1.selectbox("Chantier", chs, index=chs.index(as_text(d["Chantier"])),
-                                              format_func=lambda c: rf["chantiers"].get(c, c), key=f"mod-ch-{id_da}")
+                                              format_func=lambda c: rf["chantiers"].get(c, c), key=f"mod-ch-{cle}")
             svs = list(rf["services"])
             if as_text(d["Service Demandeur"]) not in svs:
                 svs.append(as_text(d["Service Demandeur"]))
             entete["Service Demandeur"] = a2.selectbox("Service demandeur", svs,
                                                        index=svs.index(as_text(d["Service Demandeur"])),
                                                        format_func=lambda c: rf["services"].get(c, c),
-                                                       key=f"mod-sv-{id_da}")
+                                                       key=f"mod-sv-{cle}")
             dda = a3.date_input("Date de la DA", value=to_date(d.get("Date DA")), format="DD/MM/YYYY",
-                                key=f"mod-dda-{id_da}")
+                                key=f"mod-dda-{cle}")
             entete["Date DA"] = dda.isoformat() if dda else as_text(d.get("Date DA"))
             b1, b2, b3 = st.columns(3)
-            entete["Demandeur"] = b1.text_input("Demandeur", value=as_text(d.get("Demandeur")), key=f"mod-dem-{id_da}")
+            entete["Demandeur"] = b1.text_input("Demandeur", value=as_text(d.get("Demandeur")), key=f"mod-dem-{cle}")
             entete["Responsable"] = b2.text_input("Responsable", value=as_text(d.get("Responsable")),
-                                                  key=f"mod-resp-{id_da}")
-            entete["Code DA"] = b3.text_input("Code DA", value=as_text(d.get("Code DA")), key=f"mod-cda-{id_da}")
+                                                  key=f"mod-resp-{cle}")
+            entete["Code DA"] = b3.text_input("Code DA", value=as_text(d.get("Code DA")), key=f"mod-cda-{cle}")
         c1, c2 = st.columns(2)
-        prio = c1.selectbox("Priorité", PRIORITES, key=f"mod-prio-{id_da}",
+        prio = c1.selectbox("Priorité", PRIORITES, key=f"mod-prio-{cle}",
                             index=PRIORITES.index(as_text(d["Priorité"])) if as_text(d["Priorité"]) in PRIORITES else 0)
         besoin = c2.date_input("Date de besoin", value=to_date(d.get("Date besoin")), format="DD/MM/YYYY",
-                               key=f"mod-bes-{id_da}")
+                               key=f"mod-bes-{cle}")
         lg = pd.DataFrame(lignes_de(id_da))
         lg = lg.loc[lg["Statut ligne"].map(as_text) != "Annulée"].sort_values("N° Ligne")
         cols = ["ID_Ligne", "N° Ligne", "Désignation", "Référence", "Code_Parc", "Colisage", "Quantité", "Usage"]
@@ -970,7 +971,7 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
         for c in cols:
             v[c] = v[c].map(as_text) if c != "Quantité" else v[c].map(lambda x: float(_num(x) or 0))
         st.caption("Modifiez directement le tableau. Pour retirer un article : cochez la ligne puis 🗑 (ou quantité 0).")
-        ed = st.data_editor(v, hide_index=True, width="stretch", key=f"mod-ed-{id_da}", num_rows="delete",
+        ed = st.data_editor(v, hide_index=True, width="stretch", key=f"mod-ed-{cle}", num_rows="delete",
                             disabled=["N° Ligne"] if admin else ["N° Ligne", "Désignation", "Référence"],
                             column_config={"ID_Ligne": None,
                                            "Colisage": st.column_config.SelectboxColumn(
@@ -978,12 +979,12 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
                                            "Quantité": st.column_config.NumberColumn(min_value=0.0, format="%.2f")})
 
         # ---- articles ajoutés (catalogue ou saisie libre)
-        cle_aj = f"mod-aj-{id_da}"
+        cle_aj = f"mod-aj-{cle}"
         st.session_state.setdefault(cle_aj, [])
         st.markdown("###### Ajouter un article")
         nb_aj = len(st.session_state[cle_aj])
-        des, ref, code, col_def, cles = choisir_article(f"modart-{id_da}", nb_aj)
-        with st.form(f"mod-form-{id_da}-{des or ''}-{ref}-{nb_aj}", clear_on_submit=True):
+        des, ref, code, col_def, cles = choisir_article(f"modart-{cle}", nb_aj)
+        with st.form(f"mod-form-{cle}-{des or ''}-{ref}-{nb_aj}", clear_on_submit=True):
             a1, a2, a3, a4 = st.columns(4)
             colis = a1.selectbox("Colisage", COLISAGES, index=COLISAGES.index(col_def) if col_def in COLISAGES else 0)
             qte = a2.number_input("Quantité", min_value=0.0, step=1.0, value=1.0)
@@ -1001,14 +1002,14 @@ def modifier_da(d: dict, user: dict, admin: bool = False):
         for i, l in enumerate(st.session_state[cle_aj]):
             a, b = st.columns([6, 1])
             a.write(f"➕ {l['Désignation']} {l['Référence']} — {l['Quantité']:g} {l['Colisage']} · {l['Usage']}")
-            if b.button("✕", key=f"mod-del-{id_da}-{i}"):
+            if b.button("✕", key=f"mod-del-{cle}-{i}"):
                 st.session_state[cle_aj].pop(i)
                 st.rerun()
 
         obs = st.text_area("Observations" + (" (réponse au motif du rejet)" if rejet else ""),
-                           value=as_text(d.get("Observations")), key=f"mod-obs-{id_da}", height=68)
+                           value=as_text(d.get("Observations")), key=f"mod-obs-{cle}", height=68)
         libelle = "Renvoyer la DA corrigée" if rejet else "Enregistrer les modifications de la DA"
-        if not st.button(libelle, type="primary", key=f"mod-go-{id_da}"):
+        if not st.button(libelle, type="primary", key=f"mod-go-{cle}"):
             return
         ajouts = st.session_state[cle_aj]
         gardees = ed.loc[ed["Quantité"].map(lambda x: float(x or 0)) > 0]
@@ -1791,7 +1792,8 @@ def _fragment(fn, nom: str):
 def contexte(user: dict):
     from types import SimpleNamespace
     return SimpleNamespace(load=load, refresh=refresh, get_store=get_store, refs=refs, picker=choisir_article,
-                           user=user, fragment=_fragment, version=version_donnees, secret=_secret)
+                           user=user, fragment=_fragment, version=version_donnees, secret=_secret,
+                           modifier_da=lambda d: modifier_da(d, user, admin=user.get("Rôle") in ROLES_ADMIN, suffixe="-ach"))
 
 
 def bloquer_traduction():
